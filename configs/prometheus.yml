@@ -1,0 +1,49 @@
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  - job_name: ingestion_service
+    static_configs:
+      - targets: ["ingestion_service:8000"]
+
+  - job_name: investigation_api
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["investigation_api:8001"]
+
+  - job_name: geolocation_service
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["geolocation_service:8002"]
+
+  - job_name: parser_service
+    static_configs:
+      - targets: ["parser_service:9101"]
+
+  - job_name: event_router
+    static_configs:
+      - targets: ["event_router:9102"]
+
+  - job_name: threat_intel_service
+    static_configs:
+      - targets: ["threat_intel_service:9103"]
+
+  - job_name: detection_engine
+    static_configs:
+      - targets: ["detection_engine:9104"]
+
+  - job_name: anomaly_engine
+    static_configs:
+      - targets: ["anomaly_engine:9105"]
+
+  - job_name: risk_engine
+    static_configs:
+      - targets: ["risk_engine:9106"]
+
+  - job_name: correlation_engine
+    static_configs:
+      - targets: ["correlation_engine:9107"]
+
+  - job_name: alert_service
+    static_configs:
+      - targets: ["alert_service:9108"]

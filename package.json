@@ -1,0 +1,21 @@
+{
+  "name": "pythonproject5",
+  "version": "1.0.0",
+  "description": "Docker-first security analytics platform with Kafka-based ingestion, enrichment, detection, scoring, correlation, investigation, geolocation, and a live dashboard.",
+  "main": "index.js",
+  "directories": {
+    "test": "tests"
+  },
+  "scripts": {
+    "start": "python -m http.server 4173 --directory frontend",
+    "start:frontend": "python -m http.server 4173 --directory frontend",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "dependencies": {
+    "playwright": "^1.58.2"
+  }
+}

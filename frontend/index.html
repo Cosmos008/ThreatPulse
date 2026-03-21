@@ -1,0 +1,618 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ThreatPulse</title>
+  <link rel="stylesheet" href="src/styles.css">
+  <script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js"></script>
+</head>
+<body>
+  <div class="app-layout">
+    <aside class="sidebar" id="sidebar"></aside>
+
+    <main class="main-content">
+      <header class="app-header" id="app-header">
+        <div class="header-left">
+          <span class="logo" aria-hidden="true">🛡️</span>
+          <span class="title">ThreatPulse</span>
+        </div>
+        <div class="header-center">
+          <input id="global-search" type="search" placeholder="Hunt: ip:1.2.3.4 AND severity:high last 1 hour">
+        </div>
+        <div class="header-right">
+          <div id="user-container" class="user-info" style="display:none;">
+            <div class="user-box">
+              <div id="user-avatar" class="avatar">?</div>
+              <div class="user-meta">
+                <span id="user-name" class="user-name"></span>
+                <span id="user-role" class="user-role"></span>
+              </div>
+              <button id="logout-btn" type="button" class="logout-btn">Logout</button>
+            </div>
+          </div>
+        </div>
+      </header>
+
+      <section id="auth-gate" class="panel auth-gate">
+        <div class="auth-gate-card">
+          <div class="auth-gate-brand">
+            <h1>ThreatPulse</h1>
+          </div>
+          <div class="panel-heading">
+            <h2>Login</h2>
+          </div>
+          <div class="auth-gate-form">
+            <label class="field">
+              <span>Username</span>
+              <input id="username" type="text" placeholder="Username" autocomplete="username">
+            </label>
+            <label class="field">
+              <span>Password</span>
+              <div class="password-field">
+                <input id="password" type="password" placeholder="Password" autocomplete="current-password">
+                <button id="password-toggle" class="password-toggle" type="button" aria-label="Show password" aria-pressed="false">
+                  <span class="password-toggle-show" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" focusable="false">
+                      <path d="M12 5C6.5 5 2.1 8.4.5 12c1.6 3.6 6 7 11.5 7s9.9-3.4 11.5-7c-1.6-3.6-6-7-11.5-7Zm0 11.2A4.2 4.2 0 1 1 12 7.8a4.2 4.2 0 0 1 0 8.4Zm0-6.7A2.5 2.5 0 1 0 12 14.5a2.5 2.5 0 0 0 0-5Z"></path>
+                    </svg>
+                  </span>
+                  <span class="password-toggle-hide" aria-hidden="true" hidden>
+                    <svg viewBox="0 0 24 24" focusable="false">
+                      <path d="m3.3 2 18.7 18.7-1.4 1.4-3.2-3.2A12.6 12.6 0 0 1 12 20C6.5 20 2.1 16.6.5 13c.9-2.1 2.6-4 4.7-5.4L1.9 3.4 3.3 2Zm7.2 7.2 3.3 3.3a2.5 2.5 0 0 0-3.3-3.3Zm8.8 6L16.8 13a4.8 4.8 0 0 0-5.8-5.8L8.8 5A13.4 13.4 0 0 1 12 4c5.5 0 9.9 3.4 11.5 7-1 2.2-2.5 4-4.2 5.4Z"></path>
+                    </svg>
+                  </span>
+                </button>
+              </div>
+            </label>
+            <div id="login-error" class="login-error" style="display:none;" role="alert" aria-live="polite"></div>
+            <button id="login-button" class="button" type="button" onclick="login()">Login</button>
+          </div>
+        </div>
+      </section>
+
+      <section id="search-panel" class="panel search-panel" style="display:none;">
+        <div class="panel-heading">
+          <h2>Search Results</h2>
+          <span id="search-status" class="panel-note">Search alerts, investigations, and cases</span>
+        </div>
+        <div id="search-results" class="search-results"></div>
+      </section>
+
+      <section class="status-bar">
+        <span class="status-pill">
+          <span class="live-dot" aria-hidden="true"></span>
+          <strong id="connection-status" class="status-inline is-live">CONNECTING</strong>
+        </span>
+        <span class="status-pill">
+          <strong id="live-status" class="status-inline">Offline</strong>
+        </span>
+        <span class="status-pill">
+          <span class="status-label-inline">API</span>
+          <strong id="api-hint" class="status-inline">Waiting for API key.</strong>
+        </span>
+        <span id="stream-endpoint" class="status-endpoint">http://localhost:8001</span>
+        <span id="current-user" class="sr-only">Not logged in</span>
+      </section>
+
+      <section class="toolbar" id="api-section">
+        <label class="field">
+          <span>API Base URL</span>
+          <input id="api-base-url-input" type="url" placeholder="http://localhost:8001">
+        </label>
+        <label class="field">
+          <span>API Key</span>
+          <input id="api-key-input" type="password" placeholder="Required">
+        </label>
+        <button id="edit-api-key" class="button button-secondary" type="button">Edit API Key</button>
+        <button id="save-api-key" class="button" type="button">Save Connection</button>
+      </section>
+
+      <section class="toolbar" id="session-controls" style="display:none;">
+        <button id="show-demo" class="button button-secondary" type="button" onclick="showDemo()">Show Demo</button>
+        <button id="reload-dashboard" class="button button-secondary" type="button" onclick="reload()">Reload</button>
+      </section>
+
+      <section class="sim-panel" id="sim-panel" style="display:none;">
+        <button class="button button-sim" onclick="runScenario('credential_stuffing')">Credential Attack</button>
+        <button class="button button-sim" onclick="runScenario('ddos_spike')">DDoS</button>
+        <button class="button button-sim" onclick="runScenario('insider_threat')">Insider</button>
+      </section>
+
+      <div id="view-dashboard" class="view">
+        <main class="dashboard-grid">
+          <section class="panel panel-wide">
+            <section class="panel">
+              <div class="panel-heading">
+                <h2>Overview</h2>
+                <span class="panel-note">Last update: <strong id="last-updated">Never</strong></span>
+              </div>
+              <div class="metrics-grid">
+                <article class="metric">
+                  <span>Total Attacks</span>
+                  <strong id="total-attacks">0</strong>
+                </article>
+                <article class="metric">
+                  <span>Attacks / Min</span>
+                  <strong id="attacks-per-minute">0</strong>
+                </article>
+                <article class="metric">
+                  <span>Unique IPs</span>
+                  <strong id="unique-ips">0</strong>
+                </article>
+                <article class="metric">
+                  <span>High Severity</span>
+                  <strong id="high-severity-percent">0%</strong>
+                </article>
+                <article class="metric">
+                  <span>Honeypot Triggers</span>
+                  <strong id="honeypot-triggers">0</strong>
+                  <small id="honeypot-last-triggered" class="metric-note">No recent trigger</small>
+                </article>
+                <article class="metric">
+                  <span>Top Correlated IP</span>
+                  <strong id="top-correlated-ip">None</strong>
+                </article>
+              </div>
+            </section>
+
+            <section class="panel panel-half">
+              <div class="panel-heading">
+                <h2>Severity Breakdown</h2>
+                <span class="panel-note">Current distribution</span>
+              </div>
+              <ol id="severity-breakdown" class="ranking-list"></ol>
+            </section>
+
+            <section class="panel panel-half">
+              <div class="panel-heading">
+                <h2>Top Countries</h2>
+                <span id="country-total" class="panel-note">0 countries</span>
+              </div>
+              <ol id="top-countries" class="ranking-list"></ol>
+            </section>
+
+            <section class="panel panel-half">
+              <div class="panel-heading">
+                <h2>Top Attack Types</h2>
+                <span class="panel-note">Current data</span>
+              </div>
+              <ol id="top-attack-types" class="ranking-list"></ol>
+            </section>
+
+            <section class="panel panel-half">
+              <div class="panel-heading">
+                <h2>Recent Critical Alerts</h2>
+                <span class="panel-note">Latest high-priority detections</span>
+              </div>
+              <div id="recent-critical-alerts" class="alerts-list">
+                <div class="detail-empty-inline">No recent critical alerts.</div>
+              </div>
+            </section>
+
+            <section class="panel panel-half">
+              <div class="panel-heading">
+                <h2>Watchlist</h2>
+                <span id="watchlist-status" class="panel-note">No watchlist entries</span>
+              </div>
+              <div id="watchlist-panel" class="alerts-list">
+                <div class="detail-empty-inline">No watchlist entries yet.</div>
+              </div>
+            </section>
+
+            <section class="panel panel-half">
+              <div class="panel-heading">
+                <div>
+                  <h2>Activity</h2>
+                  <p class="panel-subtitle">Attacks detected per 5-second interval</p>
+                </div>
+                <span class="panel-note">Last 60 seconds</span>
+              </div>
+              <div class="activity-chart-shell">
+                <canvas id="timeline-canvas" class="timeline-canvas"></canvas>
+              </div>
+              <div class="activity-heatmap-block">
+                <div class="activity-heatmap-header">
+                  <span class="activity-heatmap-title">Attack intensity</span>
+                  <span class="activity-heatmap-note">5-second buckets across the last minute</span>
+                </div>
+                <div id="heatmap" class="heatmap" aria-label="Attack intensity heatmap"></div>
+              </div>
+              <p class="activity-legend">Each bar represents alerts grouped over 5 seconds</p>
+              <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+            </section>
+
+            <section class="panel panel-full">
+              <div class="panel-heading">
+                <h2>Refresh</h2>
+                <span class="panel-note">Live updates every 15 seconds</span>
+              </div>
+              <div class="refresh-bar">
+                <div class="refresh-status-group">
+                  <span id="refresh-indicator" class="refresh-indicator is-waiting" aria-hidden="true"></span>
+                  <div class="refresh-copy">
+                    <strong id="refresh-status" class="refresh-status-text">Enter API key to start monitoring</strong>
+                    <span id="refresh-message" class="refresh-message">Monitoring is paused until access is configured.</span>
+                  </div>
+                </div>
+                <div class="refresh-actions">
+                  <span id="refresh-countdown" class="refresh-countdown">Monitoring paused</span>
+                  <button id="refresh-now" class="button button-secondary" type="button" disabled>Refresh now</button>
+                </div>
+              </div>
+            </section>
+          </section>
+        </main>
+      </div>
+
+      <div id="view-investigations" class="view">
+        <main class="dashboard-grid">
+          <section class="panel panel-full">
+            <div class="panel-heading">
+              <h2>Investigations</h2>
+            </div>
+            <div class="filters-grid investigations-filters-grid">
+              <label class="field">
+                <span>Severity</span>
+                <select id="filter-severity">
+                  <option value="all">All severities</option>
+                  <option value="critical">Critical</option>
+                  <option value="high">High</option>
+                  <option value="medium">Medium</option>
+                  <option value="low">Low</option>
+                </select>
+              </label>
+              <label class="field">
+                <span>IP</span>
+                <input id="filter-ip" type="text" placeholder="e.g. 8.8.8.8">
+              </label>
+              <label class="field">
+                <span>Country</span>
+                <input id="filter-country" type="text" placeholder="e.g. US">
+              </label>
+              <label class="field">
+                <span>Status</span>
+                <select id="filter-status">
+                  <option value="all">All statuses</option>
+                  <option value="new">New</option>
+                  <option value="in_case">In Case</option>
+                  <option value="closed">Closed</option>
+                  <option value="false_positive">False Positive</option>
+                </select>
+              </label>
+              <label class="field">
+                <span>Attack type</span>
+                <select id="filter-attack-type">
+                  <option value="all">All attack types</option>
+                </select>
+              </label>
+              <label class="field">
+                <span>Time range</span>
+                <select id="filter-time-range">
+                  <option value="1m">Last 1 minute</option>
+                  <option value="1h">Last 1 hour</option>
+                  <option value="24h">Last 24 hours</option>
+                </select>
+              </label>
+              <label class="field">
+                <span>Sort by</span>
+                <select id="filter-sort">
+                  <option value="time_desc">Newest first</option>
+                  <option value="urgency_desc">Urgency</option>
+                  <option value="severity_desc">Severity</option>
+                  <option value="ip_asc">IP</option>
+                  <option value="country_asc">Country</option>
+                  <option value="status_asc">Status</option>
+                  <option value="attack_type_asc">Attack type</option>
+                </select>
+              </label>
+            </div>
+          </section>
+
+          <section class="soc-workbench soc-workbench-triage panel panel-full">
+            <div class="soc-column soc-column-left">
+              <section class="soc-stack panel panel-feed">
+                <div class="panel-heading">
+                  <h2>Alert Queue</h2>
+                  <span id="soc-feed-count" class="panel-note">0 queued alerts</span>
+                </div>
+                <div id="soc-event-feed" class="event-feed"></div>
+              </section>
+            </div>
+
+            <section class="soc-column soc-column-workspace panel">
+              <section class="soc-stack panel">
+                <div class="panel-heading">
+                  <h2>Investigation Detail</h2>
+                  <span id="detail-status" class="panel-note">Select an alert</span>
+                </div>
+                <div id="alert-detail" class="detail-empty">Choose an alert from the queue to inspect related activity and analysis context.</div>
+              </section>
+            </section>
+          </section>
+        </main>
+      </div>
+
+      <div id="view-cases" class="view">
+        <main class="dashboard-grid">
+          <section class="soc-workbench soc-workbench-cases panel panel-full">
+            <div class="soc-column soc-column-left">
+              <section class="soc-stack panel panel-feed">
+                <div class="panel-heading">
+                  <h2>Case List</h2>
+                  <span id="cases-status" class="panel-note">No cases loaded</span>
+                </div>
+                <div class="case-tabs" role="tablist" aria-label="Case queue tabs">
+                  <button id="case-tab-active" class="case-tab is-active" type="button" data-case-tab="active">Active Cases</button>
+                  <button id="case-tab-closed" class="case-tab" type="button" data-case-tab="closed">Closed Cases</button>
+                </div>
+                <div class="case-list-toolbar">
+                  <label class="field field-compact">
+                    <span>Status</span>
+                    <select id="case-filter-status">
+                      <option value="all">All statuses</option>
+                      <option value="open">Open</option>
+                      <option value="in_progress">In Progress</option>
+                      <option value="contained">Contained</option>
+                      <option value="resolved">Resolved</option>
+                      <option value="closed">Closed</option>
+                    </select>
+                  </label>
+                  <label class="field field-compact">
+                    <span>Priority</span>
+                    <select id="case-filter-priority">
+                      <option value="all">All priorities</option>
+                      <option value="critical">Critical</option>
+                      <option value="high">High</option>
+                      <option value="medium">Medium</option>
+                      <option value="low">Low</option>
+                    </select>
+                  </label>
+                  <label class="field field-compact">
+                    <span>Sort</span>
+                    <select id="case-sort">
+                      <option value="updated_desc">Newest</option>
+                      <option value="updated_asc">Oldest</option>
+                      <option value="priority_desc">Priority</option>
+                      <option value="severity_desc">Severity</option>
+                      <option value="status_asc">Status</option>
+                    </select>
+                  </label>
+                </div>
+                <div id="cases-list" class="cases-list">
+                  <div class="detail-empty-inline">No active cases yet.</div>
+                </div>
+              </section>
+            </div>
+
+            <section class="soc-column soc-column-workspace panel">
+              <section class="soc-stack panel">
+                <div class="panel-heading">
+                  <h2>Case Workspace</h2>
+                  <span class="panel-note">Details, actions, notes, and linked alerts</span>
+                </div>
+                <div id="case-detail" class="detail-empty">Select a case to inspect incident context and update workflow.</div>
+              </section>
+            </section>
+          </section>
+        </main>
+      </div>
+
+      <div id="view-hunt" class="view">
+        <main class="dashboard-grid">
+          <section class="panel panel-full">
+            <div class="panel-heading">
+              <h2>Threat Hunting</h2>
+              <span id="hunt-status" class="panel-note">Run a structured query from the global search bar</span>
+            </div>
+            <div class="filters-grid cases-filters-grid hunt-filters-row hunt-filters-row-primary">
+              <label class="field">
+                <span>Query</span>
+                <input id="hunt-query-input" type="text" placeholder="ip:172.16.10.25 AND severity:critical">
+              </label>
+              <label class="field field-compact">
+                <span>Time range</span>
+                <select id="hunt-time-range">
+                  <option value="5m">Last 5 min</option>
+                  <option value="1h">Last 1 hour</option>
+                  <option value="24h" selected>Last 24 hours</option>
+                </select>
+              </label>
+              <label class="field field-compact">
+                <span>Sort</span>
+                <select id="hunt-sort">
+                  <option value="time_desc">Newest</option>
+                  <option value="risk_desc">Risk</option>
+                  <option value="severity_desc">Severity</option>
+                  <option value="attack_asc">Attack</option>
+                  <option value="ip_asc">IP</option>
+                </select>
+              </label>
+              <div class="hunt-run-slot">
+                <span class="hunt-run-slot-label" aria-hidden="true">Actions</span>
+                <button id="hunt-run" class="button hunt-run-button" type="button">Run Hunt</button>
+              </div>
+            </div>
+            <div class="filters-grid cases-filters-grid hunt-filters-row hunt-filters-row-secondary">
+              <label class="field field-compact">
+                <span>Case status</span>
+                <select id="hunt-case-status">
+                  <option value="all" selected>All</option>
+                  <option value="no_case">No case</option>
+                  <option value="active_case">Linked to active case</option>
+                  <option value="closed_case">Linked to closed case</option>
+                </select>
+              </label>
+              <label class="field field-compact">
+                <span>Attack type</span>
+                <input id="hunt-attack-filter" type="text" placeholder="credential_stuffing">
+              </label>
+              <label class="field field-compact">
+                <span>Triage status</span>
+                <select id="hunt-status-filter">
+                  <option value="all" selected>All</option>
+                </select>
+              </label>
+              <label class="field field-compact">
+                <span>Username</span>
+                <input id="hunt-user-filter" type="text" placeholder="j.doe">
+              </label>
+              <label class="field field-compact">
+                <span>Min risk</span>
+                <input id="hunt-min-risk" type="number" min="0" max="1000" step="1" placeholder="0">
+              </label>
+            </div>
+            <div id="hunt-summary" class="panel-note">No hunt executed yet.</div>
+            <div class="hunt-table-shell">
+              <table class="hunt-table">
+                <thead>
+                  <tr>
+                    <th>Time</th>
+                    <th>Severity</th>
+                    <th>Risk</th>
+                    <th>Attack</th>
+                    <th>IP</th>
+                    <th>User</th>
+                    <th>Country</th>
+                    <th>Status</th>
+                    <th>Case</th>
+                    <th>Actions</th>
+                  </tr>
+                </thead>
+                <tbody id="hunt-results-body">
+                  <tr><td colspan="10" class="detail-empty-inline">No hunt results yet.</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+        </main>
+      </div>
+
+      <div id="view-activity" class="view">
+        <main class="dashboard-grid">
+          <section class="panel panel-full">
+            <div class="panel-heading">
+              <h2>Activity</h2>
+              <span id="activity-status" class="panel-note">No activity loaded</span>
+            </div>
+            <section class="activity-online-panel" aria-labelledby="activity-online-heading">
+              <div class="panel-heading activity-online-heading">
+                <h3 id="activity-online-heading">Online Users <span id="activity-online-count" class="panel-note">(0)</span></h3>
+                <span id="activity-online-status" class="panel-note">No users online</span>
+              </div>
+              <div id="activity-online-users" class="activity-online-list">
+                <div class="detail-empty-inline">No users online.</div>
+              </div>
+            </section>
+            <div class="filters-grid cases-filters-grid">
+              <label class="field field-compact">
+                <span>Username</span>
+                <input id="activity-filter-user" type="text" placeholder="User">
+              </label>
+              <label class="field field-compact">
+                <span>Action</span>
+                <select id="activity-filter-action">
+                  <option value="all">All actions</option>
+                </select>
+              </label>
+              <label class="field field-compact">
+                <span>Target type</span>
+                <select id="activity-filter-target">
+                  <option value="all">All targets</option>
+                  <option value="alert">Alert</option>
+                  <option value="case">Case</option>
+                  <option value="investigation">Investigation</option>
+                  <option value="auth">Auth</option>
+                </select>
+              </label>
+            </div>
+            <div id="activity-list" class="cases-list">
+              <div class="detail-empty-inline">No activity yet.</div>
+            </div>
+          </section>
+        </main>
+      </div>
+
+      <div id="view-admin" class="view">
+        <main class="dashboard-grid">
+          <section id="admin-panel" class="panel panel-full admin-panel">
+            <div class="panel-heading">
+              <h2>SOC Live View</h2>
+              <span class="panel-note">Admin-only live collaboration</span>
+            </div>
+            <div class="admin-grid">
+              <div class="admin-card">
+                <h3>Presence</h3>
+                <div id="presence-panel" class="admin-list">
+                  <div class="detail-empty-inline">No analysts online.</div>
+                </div>
+              </div>
+              <div class="admin-card">
+                <h3>Investigation Activity</h3>
+                <div id="typing-panel" class="admin-list">
+                  <div class="detail-empty-inline">No active investigations.</div>
+                </div>
+              </div>
+              <div class="admin-card">
+                <h3>SLA Watch</h3>
+                <div id="sla-panel" class="admin-list">
+                  <div class="detail-empty-inline">No alerts in scope.</div>
+                </div>
+              </div>
+              <div class="admin-card">
+                <h3>Detection Tuning</h3>
+                <div id="rules-panel" class="rules-panel">
+                  <div class="detail-empty-inline">Rule tuning is loading.</div>
+                </div>
+              </div>
+              <div class="admin-card">
+                <h3>Playbooks</h3>
+                <div id="playbooks-panel" class="admin-list">
+                  <div class="detail-empty-inline">Playbooks are loading.</div>
+                </div>
+              </div>
+            </div>
+          </section>
+        </main>
+      </div>
+
+      <div id="view-detection-rules" class="view">
+        <main class="dashboard-grid">
+          <section class="soc-workbench soc-workbench-cases panel panel-full">
+            <div class="soc-column soc-column-left">
+              <section class="soc-stack panel panel-feed">
+                <div class="panel-heading">
+                  <h2>Detection Rules</h2>
+                  <span id="detection-rules-status" class="panel-note">No rules loaded</span>
+                </div>
+                <div id="detection-rules-list" class="cases-list">
+                  <div class="detail-empty-inline">No rules available.</div>
+                </div>
+              </section>
+            </div>
+            <section class="soc-column soc-column-workspace panel">
+              <section class="soc-stack panel">
+                <div class="panel-heading">
+                  <h2>Rule Editor</h2>
+                  <span id="detection-rule-editor-status" class="panel-note">Select a rule</span>
+                </div>
+                <div id="detection-rule-editor" class="detail-empty">Choose a rule to edit detection logic and run tests.</div>
+              </section>
+            </section>
+          </section>
+        </main>
+      </div>
+    </main>
+  </div>
+
+  <script>
+    const backendProtocol = window.location.protocol === "https:" ? "https:" : "http:";
+    const backendHost = `${window.location.hostname}:8001`;
+    window.CYBERMAP_CONFIG = {
+      apiBaseUrl: localStorage.getItem("cybermap.apiBaseUrl") || `${backendProtocol}//${backendHost}`,
+      apiKey: localStorage.getItem("cybermap.apiKey") || ""
+    };
+  </script>
+  <script type="module" src="src/main.js"></script>
+</body>
+</html>

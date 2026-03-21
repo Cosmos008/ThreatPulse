@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Test and tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Node / frontend
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+dist/
+build/
+
+# IDEs
+.idea/
+.vscode/
+
+# Environment files
+.env
+
+# Local runtime / debug artifacts
+.codex_frontend_server.pid
+.codex_server.out
+.codex_server.err
+frontend_trace.txt
+*.log
+*.pid
+
+# OS files
+.DS_Store
+Thumbs.db

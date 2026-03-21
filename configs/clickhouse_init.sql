@@ -1,0 +1,25 @@
+CREATE TABLE IF NOT EXISTS security_events (
+    event_id String,
+    timestamp String,
+    event_type String,
+    source_service String,
+    user_id Nullable(String),
+    ip Nullable(String),
+    device_id Nullable(String),
+    session_id Nullable(String),
+    status Nullable(String),
+    metadata String,
+    route Nullable(String),
+    country Nullable(String),
+    country_code Nullable(String),
+    region Nullable(String),
+    city Nullable(String),
+    latitude Nullable(Float64),
+    longitude Nullable(Float64),
+    asn Nullable(String),
+    is_tor Nullable(Bool),
+    is_proxy Nullable(Bool),
+    reputation_score Nullable(Int32),
+    device_hash Nullable(String)
+) ENGINE = MergeTree()
+ORDER BY (timestamp, event_id);

@@ -1,0 +1,85 @@
+credential_stuffing:
+  threshold: 10
+  window_seconds: 60
+  metadata:
+    name: Credential Stuffing
+    attack_type: credential_stuffing
+    severity: high
+    enabled: false
+    mitre_mapping:
+      id: T1110
+      name: Brute Force
+      tactic: Credential Access
+    time_window_seconds: 60
+    condition_field: failed_attempts
+    threshold: 10
+    user_threshold: 10
+    device_threshold: 10
+streaming_fraud:
+  threshold: 50
+  window_seconds: 300
+  metadata:
+    name: Streaming Fraud
+    attack_type: streaming_fraud
+    severity: medium
+    enabled: true
+    mitre_mapping:
+      id: T1498
+      name: Network Denial of Service
+      tactic: Impact
+device_abuse:
+  threshold: 5
+  window_seconds: 600
+  metadata:
+    name: Device Abuse
+    attack_type: device_abuse
+    severity: high
+    enabled: true
+    mitre_mapping:
+      id: T1078
+      name: Valid Accounts
+      tactic: Defense Evasion
+rate_limit:
+  ip_threshold: 25
+  user_threshold: 20
+  device_threshold: 20
+  window_seconds: 60
+  metadata:
+    name: Rate Limit Abuse
+    attack_type: rate_limit_abuse
+    severity: high
+    enabled: true
+    mitre_mapping:
+      id: T1499
+      name: Endpoint Denial of Service
+      tactic: Impact
+behavior_analytics:
+  impossible_travel_window_seconds: 600
+  impossible_travel_min_kmh: 900
+  new_country_threshold: 1
+  login_time_min_history: 5
+  login_time_anomaly_hours: 6
+risk_engine:
+  threshold: 120
+  rule_weights:
+    credential_stuffing: 60
+    honeypot_access: 100
+    streaming_fraud: 40
+    device_abuse: 50
+    impossible_travel: 75
+    login_geo_anomaly: 40
+    login_time_anomaly: 30
+    device_anomaly: 45
+    rate_limit_abuse: 55
+    suspicious_device_switching: 60
+    tor_exit_node: 50
+    proxy_usage: 30
+    anomaly_spike: 70
+correlation_engine:
+  critical_rules:
+  - credential_stuffing
+  - honeypot_access
+  - tor_exit_node
+anomaly_engine:
+  min_samples: 5
+  zscore_threshold: 2.5

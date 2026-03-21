@@ -1,0 +1,109 @@
+PythonProject5/
+|
+|-- .env
+|-- .env.example
+|-- .gitignore
+|-- README.md
+|-- Repository_Structure
+|-- docker-compose.yml
+|-- package.json
+|-- package-lock.json
+|-- requirements.txt
+|-- requirements-dev.txt
+|
+|-- configs/
+|   |-- clickhouse_init.sql
+|   |-- honeypot_accounts.txt
+|   |-- prometheus.yml
+|   |-- rules.yaml
+|   `-- tor_exit_nodes.txt
+|
+|-- frontend/
+|   |-- index.html
+|   `-- src/
+|       |-- demoData.js
+|       |-- liveStream.js
+|       |-- main.js
+|       |-- scenarios.js
+|       |-- snapshotClient.js
+|       |-- statsPanel.js
+|       |-- styles.css
+|       |-- core/
+|       |   |-- actionSystem.js
+|       |   |-- alertEnrichment.js
+|       |   |-- alertLifecycle.js
+|       |   |-- api.js
+|       |   |-- auth.js
+|       |   |-- caseQueue.js
+|       |   |-- caseTimeline.js
+|       |   |-- correlation.js
+|       |   |-- domainModels.js
+|       |   |-- reputationService.js
+|       |   |-- selectors.js
+|       |   |-- state.js
+|       |   |-- websocket.js
+|       |   |-- workbenchState.js
+|       |   `-- workflowCommands.js
+|       |-- ui/
+|       |   |-- admin.js
+|       |   |-- alerts.js
+|       |   |-- cases.js
+|       |   |-- components.js
+|       |   |-- dashboard.js
+|       |   `-- investigations.js
+|       `-- views/
+|           `-- alertDetailView.js
+|
+|-- scripts/
+|   |-- manual_verify.js
+|   `-- smoke_test.ps1
+|
+|-- services/
+|   |-- __init__.py
+|   |-- alert_service/
+|   |-- anomaly_engine/
+|   |-- correlation_engine/
+|   |-- detection_engine/
+|   |-- event_router/
+|   |-- geolocation_service/
+|   |-- ingestion_service/
+|   |-- investigation_api/
+|   |   |-- Dockerfile
+|   |   |-- api.py
+|   |   |-- database.py
+|   |   |-- graph.py
+|   |   `-- models.py
+|   |-- parser_service/
+|   |-- risk_engine/
+|   `-- threat_intel_service/
+|
+|-- shared/
+|   |-- __init__.py
+|   |-- alert_state.py
+|   |-- api_security.py
+|   |-- audit_log.py
+|   |-- blocklist.py
+|   |-- clickhouse_utils.py
+|   |-- config.py
+|   |-- database_utils.py
+|   |-- event_schema.py
+|   |-- incident_records.py
+|   |-- kafka_utils.py
+|   |-- logging_utils.py
+|   |-- metrics.py
+|   |-- mitre_mapping.py
+|   |-- neo4j_utils.py
+|   |-- playbook_engine.py
+|   |-- presence.py
+|   |-- redis_utils.py
+|   |-- rule_config.py
+|   |-- topics.py
+|   |-- users.py
+|   `-- watchlist_store.py
+|
+`-- tests/
+    |-- test_api_security.py
+    |-- test_geolocation_service.py
+    |-- test_investigation_stream.py
+    |-- test_pipeline_logic.py
+    `-- test_platform_extensions.py
