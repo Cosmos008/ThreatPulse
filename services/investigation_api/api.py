@@ -414,7 +414,12 @@ def build_stream_payload(alert: dict) -> dict:
     return payload
 
 
-def serialize_alert(alert: dict) -> dict:
+def serialize_alert(
+    alert: dict,
+    *,
+    include_watchlist: bool = True,
+    watchlist_stats: dict | None = None,
+) -> dict:
     details = alert.get("details") or {}
     entity_context = _get_alert_entity_context({**alert, "details": details})
     state = get_state(str(alert.get("id"))) if alert.get("id") is not None else {}
@@ -470,7 +475,15 @@ def serialize_alert(alert: dict) -> dict:
         or state.get("closed_at")
     )
     sla_fields = _compute_sla_fields(created_at, acknowledged_at, closed_at, severity, risk_score)
-    watchlist_meta = _get_alert_watchlist_metadata({"iocs": iocs})
+    watchlist_meta = (
+        _get_alert_watchlist_metadata({"iocs": iocs}, watchlist_stats=watchlist_stats)
+        if include_watchlist
+        else {
+            "watchlist_matches": [],
+            "watchlist_hit": False,
+            "watchlist_hits_count": 0,
+        }
+    )
     playbook = build_playbook_payload({**alert, "details": details, "attack_type": alert.get("attack_type") or rule})
 
     payload = {
@@ -568,7 +581,11 @@ def serialize_alert(alert: dict) -> dict:
 
 
 def _serialize_alerts_with_correlation(raw_alerts: list[dict]) -> list[dict]:
-    serialized_alerts = [_attach_incident_links(serialize_alert(alert)) for alert in raw_alerts]
+    watchlist_stats = (_get_watchlist_cache().get("stats") or {})
+    serialized_alerts = [
+        _attach_incident_links(serialize_alert(alert, watchlist_stats=watchlist_stats))
+        for alert in raw_alerts
+    ]
     return [_attach_correlation_metadata(alert, serialized_alerts) for alert in serialized_alerts]
 
 
@@ -705,7 +722,10 @@ def _build_ioc_index(alerts: list[dict], cases: list[dict], activity: list[dict]
 
 
 def _get_cached_ioc_index():
-    alerts = [_attach_incident_links(serialize_alert(alert)) for alert in get_all_alerts()]
+    alerts = [
+        _attach_incident_links(serialize_alert(alert, include_watchlist=False))
+        for alert in get_all_alerts()
+    ]
     cases = [serialize_case(record) for record in list_cases()]
     activity = get_logs()
     signature = json.dumps({
@@ -783,10 +803,9 @@ def _get_watchlist_cache():
     return WATCHLIST_CACHE
 
 
-def _get_alert_watchlist_metadata(alert: dict) -> dict:
+def _get_alert_watchlist_metadata(alert: dict, watchlist_stats: dict | None = None) -> dict:
     iocs = alert.get("iocs") or {}
-    watchlist = _get_watchlist_cache()
-    stats = watchlist.get("stats") or {}
+    stats = watchlist_stats if watchlist_stats is not None else ((_get_watchlist_cache().get("stats")) or {})
     matches = []
     for entry_type, values in (
         ("ip", iocs.get("ips") or []),

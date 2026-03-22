@@ -66,7 +66,7 @@
               </div>
             </label>
             <div id="login-error" class="login-error" style="display:none;" role="alert" aria-live="polite"></div>
-            <button id="login-button" class="button" type="button" onclick="login()">Login</button>
+            <button id="login-button" class="button" type="button">Login</button>
           </div>
         </div>
       </section>
@@ -578,9 +578,9 @@
 
       <div id="view-detection-rules" class="view">
         <main class="dashboard-grid">
-          <section class="soc-workbench soc-workbench-cases panel panel-full">
+          <section class="soc-workbench soc-workbench-cases detection-rules-layout panel panel-full">
             <div class="soc-column soc-column-left">
-              <section class="soc-stack panel panel-feed">
+              <section class="soc-stack panel panel-feed detection-rules-list-panel">
                 <div class="panel-heading">
                   <h2>Detection Rules</h2>
                   <span id="detection-rules-status" class="panel-note">No rules loaded</span>
@@ -590,8 +590,8 @@
                 </div>
               </section>
             </div>
-            <section class="soc-column soc-column-workspace panel">
-              <section class="soc-stack panel">
+            <section class="soc-column soc-column-workspace panel detection-rules-editor-shell">
+              <section class="soc-stack panel detection-rules-editor-panel">
                 <div class="panel-heading">
                   <h2>Rule Editor</h2>
                   <span id="detection-rule-editor-status" class="panel-note">Select a rule</span>

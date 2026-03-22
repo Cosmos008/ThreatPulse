@@ -96,6 +96,12 @@ Key folders:
 docker compose up --build
 ```
 
+Named startup commands are also available:
+
+```powershell
+npm run start:backend
+```
+
 The compose file binds most ports to `127.0.0.1`, so the stack is local-only by default.
 
 ## Main URLs
@@ -172,7 +178,15 @@ Serve the frontend locally without Docker:
 npm start
 ```
 
-That serves [`frontend/`](/C:/Users/kouro/PycharmProjects/PythonProject5/frontend) on port `4173`.
+That serves [`frontend/`](/C:/Users/kouro/PycharmProjects/PythonProject5/frontend) on port `4173` using the project virtualenv on Windows.
+
+The frontend is a static HTML/CSS/ES module app. There is no bundler build step to complete before local development; a local static file server is sufficient.
+
+Start the full backend stack with one command:
+
+```powershell
+npm run start:backend
+```
 
 ## Verification
 

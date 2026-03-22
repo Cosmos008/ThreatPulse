@@ -373,7 +373,7 @@ function normalizeStoredAlert(alert) {
 
 function renderEnrichmentGroup(title, fields) {
   const rows = fields.filter(field => field.value).map(field => `
-    <span><strong>${escapeHtml(field.label)}:</strong> ${field.iocType ? buildIocPivotTriggerMarkup(field.iocType, field.value) : escapeHtml(field.value)}</span>
+    <span><strong>${escapeHtml(field.label)}:</strong> ${field.valueClass ? `<span class="${escapeHtml(field.valueClass)}">${escapeHtml(field.value)}</span>` : (field.iocType ? buildIocPivotTriggerMarkup(field.iocType, field.value) : escapeHtml(field.value))}</span>
   `).join("");
   if (!rows) {
     return "";
@@ -1389,9 +1389,9 @@ function buildChartColors(chart, buckets) {
     const enrichment = normalizeAlertEnrichment(selectedAlert);
     const reputation = getIpReputation(selectedAlert);
     const networkMarkup = renderEnrichmentGroup("Network", [
-      { label: "IP", value: enrichment.ip, iocType: "ip" },
-      { label: "Destination IP", value: enrichment.destinationIp, iocType: "ip" },
-      { label: "Country", value: enrichment.country },
+      { label: "IP", value: enrichment.ip, valueClass: "attack-type-chip mono" },
+      { label: "Destination IP", value: enrichment.destinationIp, valueClass: "attack-type-chip mono" },
+      { label: "Country", value: enrichment.country, valueClass: "record-badge" },
       { label: "Region", value: enrichment.region },
       { label: "City", value: enrichment.city },
       { label: "ASN", value: enrichment.asn },
@@ -1471,8 +1471,8 @@ function buildChartColors(chart, buckets) {
       `,
       detailGridMarkup: `
         <span><strong>Time:</strong> ${escapeHtml(formatDateTime(selectedAlert.timestamp))}</span>
-        <span><strong>Country:</strong> ${escapeHtml(selectedAlert.country)}</span>
-        <span><strong>IP:</strong> ${renderHuntPivot("ip", selectedAlert.sourceIp, selectedAlert.sourceIp)}</span>
+        <span><strong>Country:</strong> <span class="record-badge">${escapeHtml(selectedAlert.country)}</span></span>
+        <span><strong>IP:</strong> <span class="attack-type-chip mono">${escapeHtml(selectedAlert.sourceIp)}</span></span>
         <span><strong>Geo:</strong> ${escapeHtml(
           selectedAlert.sourceLat != null && selectedAlert.sourceLon != null
             ? `${selectedAlert.sourceLat.toFixed(3)}, ${selectedAlert.sourceLon.toFixed(3)}`

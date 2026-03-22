@@ -38,10 +38,11 @@ let isDemoMode = false;
 let currentUser = null;
 let isEditingApiKey = false;
 let loginErrorMessage = "";
+let loginInFlight = false;
 const DEMO_CASES_STORAGE_KEY = "cybermap.demoCases";
 
 let refreshInterval = null;
-const SESSION_DURATION = 30 * 60 * 1000;
+const LIVE_SESSION_DURATION = 30 * 60 * 1000;
 let demoAuditLogs = [];
 let activityLogEntries = [];
 let currentDemoAlerts = [];
@@ -60,6 +61,7 @@ const workflowCommands = createWorkflowCommands();
 const pendingAlertWorkflowActions = new Set();
 const pendingCaseWorkflowActions = new Set();
 let casePlaybookUiState = {};
+let loggedCaseAlertReconciliations = new Set();
 let availableCaseAssignees = [];
 let pendingCaseAssigneeId = null;
 let pendingCaseAssigneeSelections = {};
@@ -77,7 +79,11 @@ let currentHuntMinRiskFilter = "";
 let playbookDefinitions = [];
 let playbookExecutions = [];
 let autoExecutedDemoPlaybooks = new Set();
+let localPlaybookFallbackActive = false;
+let localDetectionRulesFallbackActive = false;
+let detectionRulesRouteUnavailable = false;
 let detectionRules = [];
+let detectionRuleTestResults = {};
 let selectedDetectionRuleKey = "";
 let iocPivotState = {
   open: false,
@@ -108,7 +114,8 @@ function getConfig() {
   const config = window.CYBERMAP_CONFIG || {};
   return {
     apiBaseUrl: localStorage.getItem("cybermap.apiBaseUrl") || config.apiBaseUrl || "http://localhost:8001",
-    apiKey: state.apiKey || localStorage.getItem("cybermap.apiKey") || config.apiKey || ""
+    apiKey: state.apiKey || localStorage.getItem("cybermap.apiKey") || config.apiKey || "",
+    detectionRulesApiEnabled: config.detectionRulesApi === true || config.features?.detectionRulesApi === true
   };
 }
 
@@ -189,10 +196,41 @@ function requireAuth() {
     showToast("Please login first");
     throw new Error("Not authenticated");
   }
-  if (state.user && Date.now() > Number(state.user.expiresAt || 0)) {
-    window.logout?.(true);
+  if (shouldAutoLogoutForExpiredSession()) {
+    triggerAutomaticLogout("require_auth_session_expired", {
+      expiresAt: Number(state.user?.expiresAt || 0)
+    });
     throw new Error("Session expired");
   }
+}
+
+function isDemoSessionMode() {
+  return isDemoMode || state.mode === "demo";
+}
+
+function shouldAutoLogoutForExpiredSession() {
+  return Boolean(
+    state.user
+    && !isDemoSessionMode()
+    && Date.now() > Number(state.user.expiresAt || 0)
+  );
+}
+
+function triggerAutomaticLogout(reason, details = {}) {
+  const payload = {
+    reason,
+    mode: state.mode,
+    isDemoMode,
+    user: state.user?.username || null,
+    ...details
+  };
+  if (isDemoSessionMode()) {
+    console.info("AUTO_LOGOUT_SUPPRESSED", payload);
+    return false;
+  }
+  console.warn("AUTO_LOGOUT_TRIGGERED", payload);
+  window.logout?.(true, reason, details);
+  return true;
 }
 
 function isAdmin() {
@@ -276,7 +314,7 @@ function buildCaseActivityNote(type, text) {
 }
 
 function getCaseSourceAlert(caseRecord) {
-  return caseRecord?.alert || getCaseLinkedAlerts(caseRecord)[0] || null;
+  return window.__findRuntimeAlertForCase?.(caseRecord) || caseRecord?.alert || getCaseLinkedAlerts(caseRecord)[0] || null;
 }
 
 function getCaseBlockableIp(caseRecord) {
@@ -315,6 +353,41 @@ function getBlockedIps() {
       .filter(Boolean)
   )];
 }
+
+  function isMissingRouteError(error) {
+    const message = String(error?.message || "").toLowerCase();
+    return message.includes("404") || message.includes("not found");
+  }
+
+  function supportsDetectionRulesApi() {
+    return getConfig()?.detectionRulesApiEnabled === true;
+  }
+
+  function getRouteAvailabilityCacheKey(path) {
+    const normalizedBaseUrl = String(getConfig()?.apiBaseUrl || "").replace(/\/+$/, "");
+    return `cybermap.route-unavailable:${normalizedBaseUrl}:${String(path || "").trim()}`;
+  }
+
+  function isRouteMarkedUnavailable(path) {
+    try {
+      return sessionStorage.getItem(getRouteAvailabilityCacheKey(path)) === "1";
+    } catch {
+      return false;
+    }
+  }
+
+  function markRouteUnavailable(path, unavailable = true) {
+    try {
+      const key = getRouteAvailabilityCacheKey(path);
+      if (unavailable) {
+        sessionStorage.setItem(key, "1");
+      } else {
+        sessionStorage.removeItem(key);
+      }
+    } catch {
+      // Ignore storage errors and continue using in-memory fallback state.
+    }
+  }
 
   function isIpCurrentlyBlocked(ip) {
     const normalizedIp = String(ip || "").trim();
@@ -382,7 +455,14 @@ async function bootstrap() {
   state.mode = "demo";
 
   loadSession();
-  if (state.user && Date.now() > Number(state.user.expiresAt || 0)) {
+  if (shouldAutoLogoutForExpiredSession()) {
+    console.warn("AUTO_LOGOUT_TRIGGERED", {
+      reason: "bootstrap_session_expired",
+      mode: state.mode,
+      isDemoMode,
+      user: state.user?.username || null,
+      expiresAt: Number(state.user?.expiresAt || 0)
+    });
     authLogout();
   }
   currentUser = state.user;
@@ -563,6 +643,135 @@ async function bootstrap() {
       )
       || null;
   }
+
+  function getCaseAlertSnapshot(caseRecord) {
+    if (!caseRecord || typeof caseRecord !== "object") {
+      return {};
+    }
+    const enrichmentSnapshot = (Array.isArray(caseRecord?.evidence?.enrichments) ? caseRecord.evidence.enrichments : [])
+      .map(entry => entry?.snapshot)
+      .find(snapshot => snapshot && typeof snapshot === "object") || {};
+    return {
+      ...enrichmentSnapshot,
+      ...(caseRecord.alert && typeof caseRecord.alert === "object" ? caseRecord.alert : {})
+    };
+  }
+
+  function getCaseAlertSearchContext(caseRecord) {
+    const snapshot = getCaseAlertSnapshot(caseRecord);
+    const normalizedSnapshot = normalizeEnrichmentRecord(snapshot);
+    const caseTitle = String(caseRecord?.title || "").trim();
+    const derivedTitle = caseTitle.toLowerCase().endsWith(" case")
+      ? caseTitle.slice(0, -5).trim()
+      : caseTitle;
+    return {
+      sourceIp: String(
+        snapshot.source_ip
+        || snapshot.sourceIp
+        || snapshot.ip
+        || normalizedSnapshot.ip
+        || caseRecord?.source_ip
+        || caseRecord?.sourceIp
+        || ""
+      ).trim(),
+      attackType: String(
+        snapshot.attack_type
+        || snapshot.attackType
+        || snapshot.rule
+        || normalizedSnapshot.attackType
+        || caseRecord?.attack_type
+        || caseRecord?.attackType
+        || derivedTitle
+        || ""
+      ).trim().toLowerCase(),
+      severity: String(
+        snapshot.severity
+        || caseRecord?.severity
+        || normalizedSnapshot.severity
+        || ""
+      ).trim().toLowerCase(),
+      country: String(
+        snapshot.country
+        || normalizedSnapshot.country
+        || caseRecord?.country
+        || ""
+      ).trim().toLowerCase()
+    };
+  }
+
+  function findRuntimeAlertForCase(caseRecord) {
+    if (!caseRecord || typeof caseRecord !== "object") {
+      return null;
+    }
+
+    const candidateIds = [
+      caseRecord?.source_alert_id,
+      caseRecord?.alert_id,
+      caseRecord?.sourceAlertId,
+      caseRecord?.alert?.raw?.id,
+      caseRecord?.alert?.alert_id,
+      caseRecord?.alert?.id,
+      ...(Array.isArray(caseRecord?.linked_alert_ids) ? caseRecord.linked_alert_ids : []),
+      ...(Array.isArray(caseRecord?.linkedAlertIds) ? caseRecord.linkedAlertIds : [])
+    ]
+      .map(value => String(value || "").trim())
+      .filter(Boolean);
+    for (const candidateId of candidateIds) {
+      const resolvedAlert = findAlertByAnyId(candidateId);
+      if (resolvedAlert?.id) {
+        return resolvedAlert;
+      }
+    }
+
+    const currentAlerts = Array.isArray(statsPanel.getAlerts?.()) ? statsPanel.getAlerts() : state.alerts;
+    if (!Array.isArray(currentAlerts) || !currentAlerts.length) {
+      return null;
+    }
+
+    const normalizedCaseId = String(caseRecord?.id || "").trim();
+    const directCaseMatch = currentAlerts.find(alert =>
+      String(alert?.caseId || alert?.case_id || alert?.mergedIntoCaseId || alert?.merged_into_case_id || "").trim() === normalizedCaseId
+    );
+    if (directCaseMatch?.id) {
+      return directCaseMatch;
+    }
+
+    const context = getCaseAlertSearchContext(caseRecord);
+    const scoredMatches = currentAlerts
+      .map(alert => {
+        const normalizedAlert = normalizeEnrichmentRecord(alert);
+        const alertIp = String(alert?.sourceIp || alert?.source_ip || alert?.ip || normalizedAlert.ip || "").trim();
+        const alertAttackType = String(alert?.attackType || alert?.attack_type || alert?.rule || normalizedAlert.attackType || "").trim().toLowerCase();
+        const alertSeverity = String(alert?.severity || normalizedAlert.severity || "").trim().toLowerCase();
+        const alertCountry = String(alert?.country || normalizedAlert.country || "").trim().toLowerCase();
+        let score = 0;
+        if (context.sourceIp && alertIp === context.sourceIp) {
+          score += 4;
+        }
+        if (context.attackType && alertAttackType === context.attackType) {
+          score += 3;
+        }
+        if (context.severity && alertSeverity === context.severity) {
+          score += 1;
+        }
+        if (context.country && alertCountry === context.country) {
+          score += 1;
+        }
+        return { alert, score };
+      })
+      .filter(entry => entry.score >= 4)
+      .sort((left, right) => {
+        if (right.score !== left.score) {
+          return right.score - left.score;
+        }
+        return Number(right.alert?.timestamp || right.alert?.createdAt || right.alert?.created_at || 0)
+          - Number(left.alert?.timestamp || left.alert?.createdAt || left.alert?.created_at || 0);
+      });
+
+    return scoredMatches[0]?.alert || null;
+  }
+
+  window.__findRuntimeAlertForCase = findRuntimeAlertForCase;
 
   function getFrontendAlertId(alertRef) {
     const alert = findAlertByAnyId(alertRef);
@@ -993,8 +1202,50 @@ async function bootstrap() {
   }
 
   function setCasesState(nextCases) {
-    casesCache = Array.isArray(nextCases) ? nextCases.map(normalizeCaseModel) : [];
+    casesCache = Array.isArray(nextCases) ? nextCases.map(normalizeCaseModel).map(caseRecord => {
+      if (!(isDemoMode || state.mode === "demo")) {
+        return caseRecord;
+      }
+      const liveAlert = findRuntimeAlertForCase(caseRecord);
+      if (!liveAlert?.id) {
+        return caseRecord;
+      }
+      const reconciledLinkedAlertIds = [...new Set([
+        String(liveAlert.id || "").trim(),
+        ...(Array.isArray(caseRecord?.linked_alert_ids) ? caseRecord.linked_alert_ids : []),
+        ...(Array.isArray(caseRecord?.linkedAlertIds) ? caseRecord.linkedAlertIds : [])
+      ].filter(Boolean).map(value => String(value).trim()))];
+      const caseId = String(caseRecord.id || "");
+      const previousAlertId = String(caseRecord.source_alert_id || caseRecord.alert_id || caseRecord.sourceAlertId || "");
+      const resolvedAlertId = String(liveAlert.id || "");
+      if (previousAlertId && previousAlertId !== resolvedAlertId && !loggedCaseAlertReconciliations.has(caseId)) {
+        loggedCaseAlertReconciliations.add(caseId);
+      }
+      return normalizeCaseModel({
+        ...caseRecord,
+        source_alert_id: String(liveAlert.id || ""),
+        alert_id: String(liveAlert.id || ""),
+        sourceAlertId: String(liveAlert.id || ""),
+        linked_alert_ids: reconciledLinkedAlertIds,
+        alert: {
+          ...(getCaseAlertSnapshot(caseRecord) || {}),
+          ...liveAlert,
+          id: String(liveAlert.id || "")
+        }
+      });
+    }) : [];
     state.cases = [...casesCache];
+    if (isDemoMode || state.mode === "demo") {
+      casesCache.forEach(caseRecord => {
+        const liveAlert = findRuntimeAlertForCase(caseRecord);
+        if (liveAlert?.id) {
+          markAlertCaseCreatedLocally(liveAlert.id, {
+            caseId: caseRecord.id,
+            investigationId: caseRecord.source_investigation_id || caseRecord.investigation_id || caseRecord.sourceInvestigationId || null
+          });
+        }
+      });
+    }
     if (isDemoMode || state.mode === "demo") {
       persistDemoCases(casesCache);
     }
@@ -1392,6 +1643,7 @@ async function bootstrap() {
         break;
       case "detection-rules":
         renderDetectionRulesView();
+        ensureDetectionRulesLoaded();
         break;
       case "cases":
         renderCasesView();
@@ -1801,49 +2053,402 @@ async function bootstrap() {
     ];
   }
 
-  async function loadDetectionRules() {
-    if (state.mode === "demo" || !state.apiKey) {
-      detectionRules = getDemoDetectionRules();
-      if (!selectedDetectionRuleKey && detectionRules.length) {
-        selectedDetectionRuleKey = detectionRules[0].key;
+  function applyDetectionRules(ruleSet, { useFallback = false } = {}) {
+    detectionRules = Array.isArray(ruleSet)
+      ? ruleSet
+        .map(rule => ({
+          ...rule,
+          key: String(rule?.key || rule?.id || "").trim(),
+          name: String(rule?.name || rule?.title || rule?.key || rule?.id || "Unnamed Rule").trim()
+        }))
+        .filter(rule => rule.key)
+      : [];
+    localDetectionRulesFallbackActive = useFallback;
+    const hasSelectedRule = detectionRules.some(rule => String(rule.key) === String(selectedDetectionRuleKey));
+    selectedDetectionRuleKey = hasSelectedRule
+      ? String(selectedDetectionRuleKey)
+      : (detectionRules[0]?.key || "");
+  }
+
+  function isUsingLocalDetectionRules() {
+    return localDetectionRulesFallbackActive || state.mode === "demo" || !state.apiKey;
+  }
+
+  function normalizeRuleSeverityLevel(value) {
+    const normalized = String(value || "low").trim().toLowerCase();
+    return ["low", "medium", "high", "critical"].includes(normalized) ? normalized : "low";
+  }
+
+  function getSeverityScore(value) {
+    return {
+      low: 1,
+      medium: 2,
+      high: 3,
+      critical: 4
+    }[normalizeRuleSeverityLevel(value)] || 1;
+  }
+
+  function severityMatchesRule(alertSeverity, ruleSeverity) {
+    return getSeverityScore(alertSeverity) >= getSeverityScore(ruleSeverity);
+  }
+
+  function normalizeDetectionRuleEditorValues(currentRule = {}) {
+    const threshold = Math.max(1, Number(currentRule.threshold) || 1);
+    const timeWindowSeconds = Math.max(60, Number(currentRule.time_window_seconds) || 60);
+    return {
+      ...currentRule,
+      attack_type: String(currentRule.attack_type || "").trim().toLowerCase(),
+      severity: normalizeRuleSeverityLevel(currentRule.severity),
+      threshold,
+      time_window_seconds: timeWindowSeconds,
+      user_threshold: Math.max(1, Number(currentRule.user_threshold) || threshold),
+      device_threshold: Math.max(1, Number(currentRule.device_threshold) || threshold),
+      enabled: currentRule.enabled !== false
+    };
+  }
+
+  function getDetectionRuleDataset() {
+    const source = Array.isArray(state.alerts) && state.alerts.length
+      ? state.alerts
+      : (statsPanel.getAlerts?.() || []);
+    return Array.isArray(source) ? source : [];
+  }
+
+  function normalizeDetectionRuleAlert(alert, index = 0) {
+    const enrichment = normalizeAlertEnrichment(alert);
+    return {
+      key: String(alert?.id || alert?.raw?.id || `${enrichment.ip || "unknown"}-${enrichment.attackType || "alert"}-${alert?.timestamp || alert?.createdAt || alert?.created_at || index}`),
+      timestamp: Number(alert?.timestamp || alert?.createdAt || alert?.created_at || 0),
+      severity: normalizeRuleSeverityLevel(alert?.severity || enrichment.severity || "low"),
+      attackType: String(alert?.attackType || alert?.attack_type || alert?.rule || enrichment.attackType || "").trim().toLowerCase(),
+      ip: String(alert?.sourceIp || alert?.source_ip || alert?.ip || enrichment.ip || "").trim(),
+      user: String(alert?.userId || alert?.user_id || enrichment.username || enrichment.account || "").trim(),
+      device: String(alert?.deviceId || alert?.device_id || enrichment.device || enrichment.hostname || "").trim(),
+      country: String(alert?.country || enrichment.country || "").trim(),
+      status: String(alert?.status || enrichment.status || alert?.lifecycle || "").trim(),
+      sourceAlert: alert
+    };
+  }
+
+  function getWindowQualifiedMatchKeys(entries, threshold, windowSeconds, selector) {
+    const normalizedThreshold = Math.max(1, Number(threshold) || 1);
+    const normalizedWindowSeconds = Math.max(1, Number(windowSeconds) || 1);
+    const qualifyingKeys = new Set();
+    if (!entries.length) {
+      return qualifyingKeys;
+    }
+    const groups = new Map();
+    entries.forEach(entry => {
+      const groupKey = String(selector(entry) || "").trim();
+      if (!groupKey) {
+        return;
       }
+      if (!groups.has(groupKey)) {
+        groups.set(groupKey, []);
+      }
+      groups.get(groupKey).push(entry);
+    });
+    groups.forEach(groupEntries => {
+      const ordered = groupEntries
+        .slice()
+        .sort((left, right) => Number(left.timestamp || 0) - Number(right.timestamp || 0));
+      let left = 0;
+      for (let right = 0; right < ordered.length; right += 1) {
+        while (
+          left < right
+          && Number(ordered[right].timestamp || 0) - Number(ordered[left].timestamp || 0) > normalizedWindowSeconds * 1000
+        ) {
+          left += 1;
+        }
+        if (right - left + 1 >= normalizedThreshold) {
+          for (let index = left; index <= right; index += 1) {
+            qualifyingKeys.add(String(ordered[index].key));
+          }
+        }
+      }
+    });
+    return qualifyingKeys;
+  }
+
+  function evaluateLocalDetectionRule(ruleInput, { persist = false } = {}) {
+    const rule = normalizeDetectionRuleEditorValues(ruleInput);
+    const alerts = getDetectionRuleDataset()
+      .map((alert, index) => normalizeDetectionRuleAlert(alert, index))
+      .filter(alert =>
+        (!rule.attack_type || alert.attackType === rule.attack_type)
+        && severityMatchesRule(alert.severity, rule.severity)
+      );
+
+    const qualifyingKeys = new Set();
+    getWindowQualifiedMatchKeys(alerts, rule.threshold, rule.time_window_seconds, entry => entry.ip)
+      .forEach(key => qualifyingKeys.add(key));
+    getWindowQualifiedMatchKeys(alerts, rule.user_threshold, rule.time_window_seconds, entry => entry.user)
+      .forEach(key => qualifyingKeys.add(key));
+    getWindowQualifiedMatchKeys(alerts, rule.device_threshold, rule.time_window_seconds, entry => entry.device)
+      .forEach(key => qualifyingKeys.add(key));
+
+    const matches = alerts
+      .filter(alert => qualifyingKeys.has(String(alert.key)))
+      .sort((left, right) => Number(right.timestamp || 0) - Number(left.timestamp || 0));
+
+    const countByField = fieldName => matches.reduce((accumulator, entry) => {
+      const value = String(entry?.[fieldName] || "").trim();
+      if (!value) {
+        return accumulator;
+      }
+      accumulator[value] = (accumulator[value] || 0) + 1;
+      return accumulator;
+    }, {});
+    const pickTopField = fieldName => {
+      const counts = Object.entries(countByField(fieldName))
+        .sort((left, right) => Number(right[1]) - Number(left[1]) || left[0].localeCompare(right[0]));
+      return counts[0] ? { value: counts[0][0], count: counts[0][1] } : null;
+    };
+
+    const result = {
+      ruleKey: String(rule.key || ""),
+      testedAt: Date.now(),
+      isPreviewOnly: rule.enabled === false,
+      totalMatches: matches.length,
+      matches,
+      summary: {
+        message: matches.length
+          ? `This rule would match ${matches.length} demo alert${matches.length === 1 ? "" : "s"} in the current dataset.`
+          : "No demo alerts/events matched this rule with the current settings.",
+        topIp: pickTopField("ip"),
+        topCountry: pickTopField("country"),
+        latestMatchAt: matches[0]?.timestamp || 0
+      },
+      ruleSnapshot: {
+        attack_type: rule.attack_type,
+        severity: rule.severity,
+        threshold: rule.threshold,
+        time_window_seconds: rule.time_window_seconds,
+        user_threshold: rule.user_threshold,
+        device_threshold: rule.device_threshold,
+        enabled: rule.enabled
+      }
+    };
+
+    if (persist && result.ruleKey) {
+      detectionRuleTestResults[result.ruleKey] = result;
+    }
+    return result;
+  }
+
+  function getDetectionRuleListIndicator(rule, usingLocalDetectionRules) {
+    const storedResult = detectionRuleTestResults[String(rule?.key || "")] || null;
+    const previewResult = usingLocalDetectionRules ? evaluateLocalDetectionRule(rule) : null;
+    const effectiveResult = storedResult || previewResult;
+    if (!effectiveResult) {
+      return {
+        label: rule?.last_triggered ? formatAbsoluteTime(rule.last_triggered) : "Never triggered",
+        detail: "No preview available"
+      };
+    }
+    return {
+      label: effectiveResult.totalMatches
+        ? `${effectiveResult.totalMatches} ${effectiveResult.totalMatches === 1 ? "match" : "matches"}`
+        : "No matches",
+      detail: effectiveResult.summary?.latestMatchAt
+        ? formatAbsoluteTime(effectiveResult.summary.latestMatchAt)
+        : (rule?.last_triggered ? formatAbsoluteTime(rule.last_triggered) : "Never triggered")
+    };
+  }
+
+  function renderDetectionRuleTestResults(rule) {
+    const result = detectionRuleTestResults[String(rule?.key || "")] || null;
+    if (!result) {
+      return `
+        <div class="detail-section enrichment-section detection-rule-results">
+          <strong>Rule Test Results</strong>
+          <div class="detail-empty-inline">Run Test Rule to preview how this detection behaves against the current demo dataset.</div>
+        </div>
+      `;
+    }
+
+    const disabledNotice = result.isPreviewOnly
+      ? `<div class="panel-note">Rule is disabled; these are preview-only matches.</div>`
+      : "";
+    const topIpLine = result.summary?.topIp
+      ? `<span>Most common IP matched: ${escapeHtml(result.summary.topIp.value)} (${escapeHtml(String(result.summary.topIp.count))})</span>`
+      : `<span>Most common IP matched: None</span>`;
+    const topCountryLine = result.summary?.topCountry
+      ? `<span>Most common country matched: ${escapeHtml(result.summary.topCountry.value)} (${escapeHtml(String(result.summary.topCountry.count))})</span>`
+      : `<span>Most common country matched: None</span>`;
+    const resultRows = result.matches.length
+      ? result.matches.map(match => `
+        <article class="detection-rule-match-item">
+          <div class="detection-rule-match-top">
+            <strong>${escapeHtml(formatAbsoluteTime(match.timestamp || 0))}</strong>
+            ${renderSeverityChip(match.severity || "low")}
+          </div>
+          <div class="detection-rule-match-meta">
+            <span>${escapeHtml(match.attackType || "unknown")}</span>
+            <span>${escapeHtml(match.ip || "Unknown IP")}</span>
+            <span>${escapeHtml(match.country || "Unknown country")}</span>
+            <span>${escapeHtml(match.user || "Unknown user")}</span>
+            <span>${escapeHtml(match.status || "No status")}</span>
+          </div>
+        </article>
+      `).join("")
+      : `<div class="detail-empty-inline">No demo alerts/events matched this rule with the current settings.</div>`;
+
+    return `
+      <div class="detail-section enrichment-section detection-rule-results">
+        <strong>Rule Test Results</strong>
+        ${disabledNotice}
+        <div class="panel-note">${escapeHtml(result.summary?.message || "No preview generated.")}</div>
+        <div class="detection-rule-impact-grid">
+          <div class="detection-rule-impact-card">
+            <span>Total matches</span>
+            <strong>${escapeHtml(String(result.totalMatches || 0))}</strong>
+          </div>
+          <div class="detection-rule-impact-card">
+            <span>Most common IP</span>
+            <strong>${escapeHtml(result.summary?.topIp?.value || "None")}</strong>
+          </div>
+          <div class="detection-rule-impact-card">
+            <span>Most common country</span>
+            <strong>${escapeHtml(result.summary?.topCountry?.value || "None")}</strong>
+          </div>
+          <div class="detection-rule-impact-card">
+            <span>Preview generated</span>
+            <strong>${escapeHtml(formatAbsoluteTime(result.testedAt || 0))}</strong>
+          </div>
+        </div>
+        <div class="detail-grid detection-rule-compact-grid">
+          <div class="field detection-rule-readonly-field"><span>Attack type</span><strong>${escapeHtml(result.ruleSnapshot.attack_type || "Any")}</strong></div>
+          <div class="field detection-rule-readonly-field"><span>Severity</span><strong>${escapeHtml(String(result.ruleSnapshot.severity || "low").toUpperCase())}</strong></div>
+          <div class="field detection-rule-readonly-field"><span>Threshold</span><strong>${escapeHtml(String(result.ruleSnapshot.threshold || 1))}</strong></div>
+          <div class="field detection-rule-readonly-field"><span>Time window</span><strong>${escapeHtml(String(result.ruleSnapshot.time_window_seconds || 60))} sec</strong></div>
+        </div>
+        <div class="detail-section detection-rule-match-section">
+          <strong>Matching Alerts/Events</strong>
+          <div class="detection-rule-match-list">${resultRows}</div>
+        </div>
+      </div>
+    `;
+  }
+
+  function getLocalPlaybookDefinitions() {
+    return [
+      {
+        key: "credential_containment",
+        id: "playbook-credential-containment",
+        title: "Credential Containment",
+        summary: "Enrich hostile IP context, create a case, assign an analyst, and block the IP.",
+        actions: [{ type: "enrich_ip" }, { type: "check_threat_intel" }, { type: "create_case" }, { type: "assign_analyst" }, { type: "block_ip" }]
+      }
+    ];
+  }
+
+  async function loadDetectionRules() {
+    if (state.mode === "demo" || !state.apiKey || !supportsDetectionRulesApi()) {
+      detectionRulesRouteUnavailable = false;
+      markRouteUnavailable("/rules/detection", false);
+      applyDetectionRules(getDemoDetectionRules(), { useFallback: true });
       renderDetectionRulesView();
       return;
     }
-    const payload = await requestJson("/rules/detection");
-    detectionRules = Array.isArray(payload.rules) ? payload.rules : [];
-    if (!selectedDetectionRuleKey && detectionRules.length) {
-      selectedDetectionRuleKey = detectionRules[0].key;
+    if (detectionRulesRouteUnavailable || isRouteMarkedUnavailable("/rules/detection")) {
+      detectionRulesRouteUnavailable = true;
+      applyDetectionRules(getDemoDetectionRules(), { useFallback: true });
+      renderDetectionRulesView();
+      return;
     }
-    renderDetectionRulesView();
+    try {
+      const payload = await requestJson("/rules/detection");
+      detectionRulesRouteUnavailable = false;
+      markRouteUnavailable("/rules/detection", false);
+      applyDetectionRules(Array.isArray(payload.rules) ? payload.rules : [], { useFallback: false });
+      renderDetectionRulesView();
+    } catch (error) {
+      if (!isMissingRouteError(error)) {
+        throw error;
+      }
+      detectionRulesRouteUnavailable = true;
+      markRouteUnavailable("/rules/detection", true);
+      applyDetectionRules(getDemoDetectionRules(), { useFallback: true });
+      renderDetectionRulesView();
+    }
   }
 
   function getSelectedDetectionRule() {
     return detectionRules.find(rule => String(rule.key) === String(selectedDetectionRuleKey)) || detectionRules[0] || null;
   }
 
+  function buildDetectionRuleKey(value) {
+    const normalized = String(value || "")
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "_")
+      .replace(/^_+|_+$/g, "");
+    return normalized || `custom_rule_${Date.now()}`;
+  }
+
+  function createDetectionRuleDraft() {
+    const timestamp = Date.now();
+    return normalizeDetectionRuleEditorValues({
+      key: `custom_rule_${timestamp}`,
+      name: `Custom Rule ${detectionRules.length + 1}`,
+      attack_type: "",
+      severity: "medium",
+      enabled: true,
+      mitre_mapping: {
+        id: "",
+        name: "",
+        tactic: ""
+      },
+      threshold: 5,
+      time_window_seconds: 300,
+      user_threshold: 5,
+      device_threshold: 5,
+      last_triggered: 0
+    });
+  }
+
   function renderDetectionRulesView() {
+    const usingLocalDetectionRules = isUsingLocalDetectionRules();
     if (detectionRulesStatusNode) {
       detectionRulesStatusNode.textContent = detectionRules.length
-        ? `${detectionRules.length} ${state.mode === "demo" || !state.apiKey ? "demo" : "live"} rules loaded`
-        : (state.mode === "demo" || !state.apiKey ? "Demo mode: sample rules unavailable" : "No rules loaded");
+        ? `${detectionRules.length} ${usingLocalDetectionRules ? "local" : "live"} rules loaded`
+        : (usingLocalDetectionRules ? "Local sample rules unavailable" : "No rules loaded");
     }
     if (detectionRulesListNode) {
       if (!detectionRules.length) {
-        detectionRulesListNode.innerHTML = `<div class="detail-empty-inline">${escapeHtml(state.mode === "demo" || !state.apiKey ? "Demo rules are unavailable right now. Reload demo mode to repopulate sample detections." : "Detection rules could not be loaded from the backend.")}</div>`;
+        detectionRulesListNode.innerHTML = `
+          <div class="detection-rule-list-actions">
+            <button type="button" class="button detection-rule-button" id="add-detection-rule">Add Rule</button>
+          </div>
+          <div class="detail-empty-inline">${escapeHtml(usingLocalDetectionRules ? "Local sample rules are unavailable right now. Reload the session to repopulate detections." : "Detection rules could not be loaded from the backend.")}</div>
+        `;
       } else {
         detectionRulesListNode.innerHTML = `
-          <div class="panel-note detection-rules-banner">${escapeHtml(state.mode === "demo" || !state.apiKey ? "Demo mode uses local sample rules. Changes are safe and remain local to this session." : "Connected to the live rule store.")}</div>
-          ${detectionRules.map(rule => `
+          <div class="panel-note detection-rules-banner">${escapeHtml(usingLocalDetectionRules ? "Using local detection rules because the backend rule route is unavailable. Changes stay in this session." : "Connected to the live rule store.")}</div>
+          <div class="detection-rule-list-actions">
+            <button type="button" class="button detection-rule-button" id="add-detection-rule">Add Rule</button>
+          </div>
+          ${detectionRules.map(rule => {
+            const indicator = getDetectionRuleListIndicator(rule, usingLocalDetectionRules);
+            return `
           <button type="button" class="case-card detection-rule-card${String(rule.key) === String(selectedDetectionRuleKey) ? " is-selected" : ""}" data-detection-rule-key="${escapeHtml(String(rule.key))}">
-            <div class="case-card-top">
-              <strong>${escapeHtml(rule.name || rule.key)}</strong>
+            <div class="case-card-top detection-rule-card-top">
+              <div class="detection-rule-card-title">
+                ${String(rule.key) === String(selectedDetectionRuleKey) ? `<span class="detection-rule-selected-tick" aria-hidden="true">✓</span>` : `<span class="detection-rule-selected-tick is-placeholder" aria-hidden="true"></span>`}
+                <strong>${escapeHtml(rule.name || rule.key)}</strong>
+              </div>
               ${renderSeverityChip(rule.severity || "medium")}
             </div>
-            <div class="case-card-meta"><span>${escapeHtml(rule.attack_type || rule.key)}</span><span>${escapeHtml(rule.enabled ? "Enabled" : "Disabled")}</span></div>
-            <div class="case-card-meta"><span>${escapeHtml(rule.mitre_mapping?.id || "No MITRE")}</span><span>${escapeHtml(rule.last_triggered ? formatAbsoluteTime(rule.last_triggered) : "Never triggered")}</span></div>
+            <div class="case-card-meta detection-rule-card-meta"><span>${escapeHtml(rule.attack_type || rule.key)}</span><span>${escapeHtml(rule.enabled ? "Enabled" : "Disabled")}</span></div>
+            <div class="case-card-meta detection-rule-card-meta"><span>${escapeHtml(rule.mitre_mapping?.id || "No MITRE")}</span><span>${escapeHtml(rule.last_triggered ? formatAbsoluteTime(rule.last_triggered) : "Never triggered")}</span></div>
+            <div class="case-card-meta detection-rule-card-meta"><span>${escapeHtml(indicator.label)}</span><span>${escapeHtml(indicator.detail)}</span></div>
           </button>
-        `).join("")}`;
+        `;
+          }).join("")}`;
+        detectionRulesListNode.querySelector("#add-detection-rule")?.addEventListener("click", () => {
+          window.addDetectionRule?.();
+        });
         detectionRulesListNode.querySelectorAll("[data-detection-rule-key]").forEach(button => {
           button.addEventListener("click", () => {
             selectedDetectionRuleKey = button.getAttribute("data-detection-rule-key");
@@ -1851,6 +2456,9 @@ async function bootstrap() {
           });
         });
       }
+      detectionRulesListNode.querySelector("#add-detection-rule")?.addEventListener("click", () => {
+        window.addDetectionRule?.();
+      });
     }
 
     const rule = getSelectedDetectionRule();
@@ -1867,31 +2475,33 @@ async function bootstrap() {
     detectionRuleEditorStatusNode.textContent = rule.name || rule.key;
     detectionRuleEditorNode.className = "detail-panel";
     detectionRuleEditorNode.innerHTML = `
-      <div class="detail-section enrichment-section">
+      <div class="detail-section enrichment-section detection-rule-editor">
         <strong>Rule Settings</strong>
-        <div class="detail-grid">
-          <label class="field"><span>Rule name</span><input id="rule-editor-name" type="text" value="${escapeHtml(rule.name || "")}"></label>
-          <label class="field"><span>Attack type</span><input id="rule-editor-attack-type" type="text" value="${escapeHtml(rule.attack_type || "")}"></label>
-          <label class="field"><span>Severity</span>
+        <div class="detail-grid detection-rule-form-grid">
+          <label class="field detection-rule-field"><span>Rule name</span><input id="rule-editor-name" type="text" value="${escapeHtml(rule.name || "")}"></label>
+          <label class="field detection-rule-field"><span>Attack type</span><input id="rule-editor-attack-type" type="text" value="${escapeHtml(rule.attack_type || "")}"></label>
+          <label class="field detection-rule-field"><span>Severity</span>
             <select id="rule-editor-severity">
               ${["low", "medium", "high", "critical"].map(value => `<option value="${value}"${String(rule.severity) === value ? " selected" : ""}>${value.toUpperCase()}</option>`).join("")}
             </select>
           </label>
-          <label class="field"><span>Enabled</span><input id="rule-editor-enabled" type="checkbox"${rule.enabled ? " checked" : ""}></label>
-          <label class="field"><span>Threshold</span><input id="rule-editor-threshold" type="number" value="${escapeHtml(String(rule.threshold ?? 0))}"></label>
-          <label class="field"><span>Time window (sec)</span><input id="rule-editor-time-window" type="number" value="${escapeHtml(String(rule.time_window_seconds ?? 60))}"></label>
-          <label class="field"><span>User threshold</span><input id="rule-editor-user-threshold" type="number" value="${escapeHtml(String(rule.user_threshold ?? rule.threshold ?? 0))}"></label>
-          <label class="field"><span>Device threshold</span><input id="rule-editor-device-threshold" type="number" value="${escapeHtml(String(rule.device_threshold ?? rule.threshold ?? 0))}"></label>
-          <label class="field"><span>MITRE ID</span><input id="rule-editor-mitre-id" type="text" value="${escapeHtml(rule.mitre_mapping?.id || "")}"></label>
-          <label class="field"><span>MITRE Name</span><input id="rule-editor-mitre-name" type="text" value="${escapeHtml(rule.mitre_mapping?.name || "")}"></label>
-          <label class="field"><span>MITRE Tactic</span><input id="rule-editor-mitre-tactic" type="text" value="${escapeHtml(rule.mitre_mapping?.tactic || "")}"></label>
+          <label class="field detection-rule-field detection-rule-toggle-field"><span>Enabled</span><input id="rule-editor-enabled" type="checkbox"${rule.enabled ? " checked" : ""}></label>
+          <label class="field detection-rule-field"><span>Threshold</span><input id="rule-editor-threshold" type="number" value="${escapeHtml(String(rule.threshold ?? 0))}"></label>
+          <label class="field detection-rule-field"><span>Time window (sec)</span><input id="rule-editor-time-window" type="number" value="${escapeHtml(String(rule.time_window_seconds ?? 60))}"></label>
+          <label class="field detection-rule-field"><span>User threshold</span><input id="rule-editor-user-threshold" type="number" value="${escapeHtml(String(rule.user_threshold ?? rule.threshold ?? 0))}"></label>
+          <label class="field detection-rule-field"><span>Device threshold</span><input id="rule-editor-device-threshold" type="number" value="${escapeHtml(String(rule.device_threshold ?? rule.threshold ?? 0))}"></label>
+          <label class="field detection-rule-field"><span>MITRE ID</span><input id="rule-editor-mitre-id" type="text" value="${escapeHtml(rule.mitre_mapping?.id || "")}"></label>
+          <label class="field detection-rule-field"><span>MITRE Name</span><input id="rule-editor-mitre-name" type="text" value="${escapeHtml(rule.mitre_mapping?.name || "")}"></label>
+          <label class="field detection-rule-field"><span>MITRE Tactic</span><input id="rule-editor-mitre-tactic" type="text" value="${escapeHtml(rule.mitre_mapping?.tactic || "")}"></label>
         </div>
-        <div class="playbook-controls">
-          <button class="button" type="button" id="save-detection-rule">Save Rule</button>
-          <button class="button button-secondary" type="button" id="test-detection-rule">Test Rule</button>
-          <span class="panel-note">Last triggered: ${escapeHtml(rule.last_triggered ? formatAbsoluteTime(rule.last_triggered) : "Never")}</span>
+        <div class="playbook-controls detection-rule-controls">
+          <button class="button detection-rule-button" type="button" id="save-detection-rule">Save Rule</button>
+          <button class="button button-secondary detection-rule-button" type="button" id="test-detection-rule">Test Rule</button>
+          <button class="button button-secondary detection-rule-button detection-rule-delete-button" type="button" id="delete-detection-rule">Delete Rule</button>
+          <span class="panel-note detection-rule-helper">${escapeHtml(rule.enabled ? "Rule is enabled" : "Rule is disabled; testing stays preview-only")} · Last triggered: ${escapeHtml(rule.last_triggered ? formatAbsoluteTime(rule.last_triggered) : "Never")}</span>
         </div>
-        <div id="rule-test-result" class="panel-note"></div>
+        <div id="rule-test-result" class="panel-note detection-rule-inline-result"></div>
+        ${renderDetectionRuleTestResults(rule)}
       </div>
     `;
     detectionRuleEditorNode.querySelector("#save-detection-rule")?.addEventListener("click", () => {
@@ -1900,9 +2510,28 @@ async function bootstrap() {
     detectionRuleEditorNode.querySelector("#test-detection-rule")?.addEventListener("click", () => {
       window.testDetectionRule?.(rule.key);
     });
+    detectionRuleEditorNode.querySelector("#delete-detection-rule")?.addEventListener("click", () => {
+      window.deleteDetectionRule?.(rule.key);
+    });
   }
 
-  function stopSocLiveView() {
+  function ensureDetectionRulesLoaded() {
+    const shouldUseLocalRules = state.mode === "demo" || !state.apiKey;
+    if (detectionRules.length) {
+      renderDetectionRulesView();
+      return Promise.resolve();
+    }
+    if (shouldUseLocalRules || detectionRulesRouteUnavailable) {
+      return loadDetectionRules().catch(error => {
+        console.error(error);
+      });
+    }
+    return loadDetectionRules().catch(error => {
+      console.error(error);
+    });
+  }
+
+  function stopSocLiveView({ clearDetectionRules = false } = {}) {
     if (presenceHeartbeatInterval) {
       window.clearInterval(presenceHeartbeatInterval);
       presenceHeartbeatInterval = null;
@@ -1915,8 +2544,13 @@ async function bootstrap() {
     adminPresenceUsers = [];
     state.onlineUsers = [];
     rulesConfig = {};
-    detectionRules = [];
-    selectedDetectionRuleKey = "";
+    if (clearDetectionRules) {
+      detectionRules = [];
+      detectionRuleTestResults = {};
+      selectedDetectionRuleKey = "";
+      localDetectionRulesFallbackActive = false;
+      detectionRulesRouteUnavailable = false;
+    }
     renderAdminSocView();
     renderDetectionRulesView();
     renderOnlineUsersPanel();
@@ -1944,7 +2578,6 @@ async function bootstrap() {
       loadAdminPresence().catch(() => {});
     }, 30000);
     loadRulesConfig().catch(() => {});
-    loadDetectionRules().catch(() => {});
   }
 
   window.saveRuleConfig = async rule => {
@@ -1991,21 +2624,22 @@ async function bootstrap() {
   };
 
   function readDetectionRuleEditorValues(currentRule) {
-    return {
+    return normalizeDetectionRuleEditorValues({
+      ...currentRule,
       name: document.getElementById("rule-editor-name")?.value || currentRule.name,
       attack_type: document.getElementById("rule-editor-attack-type")?.value || currentRule.attack_type,
       severity: document.getElementById("rule-editor-severity")?.value || currentRule.severity,
       enabled: Boolean(document.getElementById("rule-editor-enabled")?.checked),
-      threshold: Number(document.getElementById("rule-editor-threshold")?.value ?? currentRule.threshold) || currentRule.threshold,
-      time_window_seconds: Number(document.getElementById("rule-editor-time-window")?.value ?? currentRule.time_window_seconds) || currentRule.time_window_seconds,
-      user_threshold: Number(document.getElementById("rule-editor-user-threshold")?.value ?? currentRule.user_threshold) || currentRule.user_threshold,
-      device_threshold: Number(document.getElementById("rule-editor-device-threshold")?.value ?? currentRule.device_threshold) || currentRule.device_threshold,
+      threshold: Number(document.getElementById("rule-editor-threshold")?.value ?? currentRule.threshold) || currentRule.threshold || 1,
+      time_window_seconds: Number(document.getElementById("rule-editor-time-window")?.value ?? currentRule.time_window_seconds) || currentRule.time_window_seconds || 60,
+      user_threshold: Number(document.getElementById("rule-editor-user-threshold")?.value ?? currentRule.user_threshold) || currentRule.user_threshold || currentRule.threshold || 1,
+      device_threshold: Number(document.getElementById("rule-editor-device-threshold")?.value ?? currentRule.device_threshold) || currentRule.device_threshold || currentRule.threshold || 1,
       mitre_mapping: {
         id: document.getElementById("rule-editor-mitre-id")?.value || currentRule.mitre_mapping?.id || "",
         name: document.getElementById("rule-editor-mitre-name")?.value || currentRule.mitre_mapping?.name || "",
         tactic: document.getElementById("rule-editor-mitre-tactic")?.value || currentRule.mitre_mapping?.tactic || "",
       }
-    };
+    });
   }
 
   window.saveDetectionRule = async ruleKey => {
@@ -2014,10 +2648,22 @@ async function bootstrap() {
       return;
     }
     const nextRule = { ...currentRule, ...readDetectionRuleEditorValues(currentRule) };
-    if (state.mode === "demo" || !state.apiKey) {
+    const nextKey = buildDetectionRuleKey(nextRule.key || nextRule.name || currentRule.key);
+    nextRule.key = nextKey;
+    if (isUsingLocalDetectionRules()) {
       detectionRules = detectionRules.map(rule => String(rule.key) === String(ruleKey) ? nextRule : rule);
+      if (String(ruleKey) !== String(nextKey) && detectionRuleTestResults[String(ruleKey)]) {
+        detectionRuleTestResults[String(nextKey)] = detectionRuleTestResults[String(ruleKey)];
+        delete detectionRuleTestResults[String(ruleKey)];
+      }
+      const previewResult = evaluateLocalDetectionRule(nextRule, { persist: true });
+      if (previewResult.summary?.latestMatchAt) {
+        nextRule.last_triggered = previewResult.summary.latestMatchAt;
+        detectionRules = detectionRules.map(rule => String(rule.key) === String(nextKey) ? nextRule : rule);
+      }
+      selectedDetectionRuleKey = nextKey;
       renderDetectionRulesView();
-      showToast(`Updated ${nextRule.name}`);
+      showToast(`Updated ${nextRule.name} for this session only`);
       return;
     }
     try {
@@ -2035,20 +2681,57 @@ async function bootstrap() {
     }
   };
 
+  window.addDetectionRule = async () => {
+    const draftRule = createDetectionRuleDraft();
+    if (isUsingLocalDetectionRules()) {
+      detectionRules = [draftRule, ...detectionRules];
+      selectedDetectionRuleKey = draftRule.key;
+      renderDetectionRulesView();
+      showToast(`Added ${draftRule.name} for this session`);
+      return;
+    }
+    showToast("Add Rule is only available in local session mode right now");
+  };
+
+  window.deleteDetectionRule = async ruleKey => {
+    const currentRule = detectionRules.find(rule => String(rule.key) === String(ruleKey));
+    if (!currentRule) {
+      return;
+    }
+    const confirmed = window.confirm(`Delete ${currentRule.name || currentRule.key}?`);
+    if (!confirmed) {
+      return;
+    }
+    if (isUsingLocalDetectionRules()) {
+      detectionRules = detectionRules.filter(rule => String(rule.key) !== String(ruleKey));
+      delete detectionRuleTestResults[String(ruleKey)];
+      selectedDetectionRuleKey = detectionRules[0]?.key || "";
+      renderDetectionRulesView();
+      showToast(`Deleted ${currentRule.name || currentRule.key} from this session`);
+      return;
+    }
+    showToast("Delete Rule is only available in local session mode right now");
+  };
+
   window.testDetectionRule = async ruleKey => {
     const currentRule = detectionRules.find(rule => String(rule.key) === String(ruleKey));
     if (!currentRule) {
       return;
     }
     const outputNode = document.getElementById("rule-test-result");
-    if (state.mode === "demo" || !state.apiKey) {
-      const matches = (Array.isArray(state.alerts) ? state.alerts : []).filter(alert =>
-        String(alert.attackType || alert.attack_type || alert.rule || "").toLowerCase() === String(currentRule.attack_type || "").toLowerCase()
-      ).length;
-      if (outputNode) {
-        outputNode.textContent = `Test result: ${matches} matching demo alerts`;
+    const editorRule = String(currentRule.key) === String(selectedDetectionRuleKey)
+      ? { ...currentRule, ...readDetectionRuleEditorValues(currentRule) }
+      : currentRule;
+    if (isUsingLocalDetectionRules()) {
+      const result = evaluateLocalDetectionRule(editorRule, { persist: true });
+      renderDetectionRulesView();
+      const refreshedOutputNode = document.getElementById("rule-test-result");
+      if (refreshedOutputNode) {
+        refreshedOutputNode.textContent = result.isPreviewOnly
+          ? `Preview generated: ${result.totalMatches} matches while the rule remains disabled.`
+          : `Preview generated: ${result.totalMatches} matches in the current demo dataset.`;
       }
-      showToast(`Rule test returned ${matches} matches`);
+      showToast(`Rule test returned ${result.totalMatches} ${result.totalMatches === 1 ? "match" : "matches"}`);
       return;
     }
     try {
@@ -2246,17 +2929,26 @@ async function bootstrap() {
   }
 
   function getPlaybookExecutionsForCase(caseRecord) {
+    const caseId = String(caseRecord?.id || "").trim();
+    const liveAlert = findRuntimeAlertForCase(caseRecord);
     const linkedAlertIds = new Set(
       [
         caseRecord?.source_alert_id,
         caseRecord?.alert_id,
+        caseRecord?.sourceAlertId,
         ...(Array.isArray(caseRecord?.linked_alert_ids) ? caseRecord.linked_alert_ids : []),
-        ...getCaseLinkedAlerts(caseRecord).map(alert => alert?.id || alert?.alert_id || null)
+        ...(Array.isArray(caseRecord?.linkedAlertIds) ? caseRecord.linkedAlertIds : []),
+        liveAlert?.id,
+        liveAlert?.raw?.id,
+        ...getCaseLinkedAlerts(caseRecord).map(alert => alert?.id || alert?.alert_id || alert?.raw?.id || null)
       ]
         .filter(Boolean)
         .map(value => String(value))
     );
-    return playbookExecutions.filter(entry => linkedAlertIds.has(String(entry.alert_id || "")));
+    return playbookExecutions.filter(entry =>
+      (caseId && String(entry.case_id || entry.caseId || "").trim() === caseId)
+      || linkedAlertIds.has(String(entry.alert_id || ""))
+    );
   }
 
   function getPlaybookStepResultValue(step, keys = []) {
@@ -2271,58 +2963,133 @@ async function bootstrap() {
     return "";
   }
 
-  function getPlaybookRunState(alertRef, playbookKey = "", context = {}) {
-    let alert = typeof alertRef === "object" && alertRef
-      ? findAlertByAnyId(alertRef)
-      : findAlertByAnyId(String(alertRef || ""));
-    if (!alert?.id && context.caseRecord) {
-      const resolvedAlertId = resolveCasePlaybookAlertId(context.caseRecord);
-      if (resolvedAlertId) {
-        alert = findAlertByAnyId(resolvedAlertId);
-      }
+  function evaluatePlaybookRunState(alertRef, playbookKey = "", context = {}) {
+    const caseRecord = context.caseRecord || null;
+    const caseId = String(caseRecord?.id || context.caseId || "").trim();
+    const linkedAlertId = caseRecord ? resolveCasePlaybookAlertId(caseRecord) : "";
+    let alert = linkedAlertId ? findAlertByAnyId(linkedAlertId) : null;
+    if (!alert?.id) {
+      alert = typeof alertRef === "object" && alertRef
+        ? findAlertByAnyId(alertRef)
+        : findAlertByAnyId(String(alertRef || ""));
     }
+
     const origin = String(context.origin || "investigations").toLowerCase();
     const playbook = getPlaybookByKey(playbookKey) || null;
+    const result = {
+      canRun: true,
+      reason: "",
+      code: "ready",
+      playbook: playbook?.key || playbook?.id || "",
+      diagnostics: {
+        origin,
+        caseId,
+        linkedAlertId: "",
+        playbookRunCount: 0,
+        blockedIpState: "none",
+        rerunBlockedFlag: false,
+        remediationState: "ready"
+      }
+    };
+
     if (!alert?.id) {
-      const reason = "Linked alert no longer exists for this playbook run.";
-      console.warn("PLAYBOOK_RERUN_BLOCKED", { reason, origin, alertRef, playbookKey });
-      return { canRun: false, reason, code: "missing_alert" };
+      result.canRun = false;
+      result.reason = "Linked alert no longer exists for this playbook run.";
+      result.code = "missing_alert";
+      result.diagnostics = {
+        ...result.diagnostics,
+        linkedAlertId: linkedAlertId || String(alertRef || ""),
+        rerunBlockedFlag: true,
+        remediationState: "missing_alert"
+      };
+      return result;
     }
 
     const lifecycle = normalizeAlertLifecycle(alert);
     const disposition = String(alert.disposition || alert.alertDisposition || alert.alert_disposition || "").toLowerCase();
-    if (lifecycle === "false_positive") {
-      const reason = "Linked alert no longer eligible: alert is marked false positive.";
-      console.warn("PLAYBOOK_RERUN_BLOCKED", { reason, origin, alertId: alert.id, playbookKey });
-      return { canRun: false, reason, code: "false_positive" };
-    }
-    if (lifecycle === "closed") {
-      const reason = "Linked alert no longer eligible: alert is closed.";
-      console.warn("PLAYBOOK_RERUN_BLOCKED", { reason, origin, alertId: alert.id, playbookKey });
-      return { canRun: false, reason, code: "closed" };
-    }
-    if (disposition === "suppressed") {
-      const reason = "Linked alert no longer eligible: alert remains suppressed.";
-      console.warn("PLAYBOOK_RERUN_BLOCKED", { reason, origin, alertId: alert.id, playbookKey });
-      return { canRun: false, reason, code: "suppressed" };
-    }
-
-    const latestExecution = getLatestPlaybookExecutionForAlert(alert.id);
+    const playbookRuns = getPlaybookExecutionsForAlert(alert.id);
+    const latestExecution = playbookRuns
+      .slice()
+      .sort((left, right) => Number(right.completed_at || right.started_at || 0) - Number(left.completed_at || left.started_at || 0))[0] || null;
     const blockedIp = latestExecution?.steps
       ?.map(step => getPlaybookStepResultValue(step, ["ip"]))
       .find(Boolean) || getAlertPrimaryIp(alert);
-    if (blockedIp && isIpCurrentlyBlocked(blockedIp)) {
-      const reason = `Playbook already remediated IP ${blockedIp}. Unblock the IP before rerunning.`;
-      console.warn("PLAYBOOK_RERUN_BLOCKED", { reason, origin, alertId: alert.id, playbookKey, blockedIp });
-      return { canRun: false, reason, code: "ip_still_blocked", blockedIp };
-    }
+    const isBlocked = blockedIp ? isIpCurrentlyBlocked(blockedIp) : false;
 
+    result.diagnostics = {
+      ...result.diagnostics,
+      linkedAlertId: String(alert.id || linkedAlertId || ""),
+      playbookRunCount: playbookRuns.length,
+      blockedIpState: blockedIp ? (isBlocked ? `blocked:${blockedIp}` : `unblocked:${blockedIp}`) : "none",
+      remediationState: playbookRuns.length
+        ? (isBlocked ? "remediated_active" : "remediation_reversed")
+        : "not_started"
+    };
+
+    if (lifecycle === "false_positive") {
+      result.canRun = false;
+      result.reason = "Linked alert no longer eligible: alert is marked false positive.";
+      result.code = "false_positive";
+      result.diagnostics.rerunBlockedFlag = true;
+      result.diagnostics.remediationState = "alert_false_positive";
+      return result;
+    }
+    if (lifecycle === "closed") {
+      result.canRun = false;
+      result.reason = "Linked alert no longer eligible: alert is closed.";
+      result.code = "closed";
+      result.diagnostics.rerunBlockedFlag = true;
+      result.diagnostics.remediationState = "alert_closed";
+      return result;
+    }
+    if (disposition === "suppressed") {
+      result.canRun = false;
+      result.reason = "Linked alert no longer eligible: alert remains suppressed.";
+      result.code = "suppressed";
+      result.diagnostics.rerunBlockedFlag = true;
+      result.diagnostics.remediationState = "alert_suppressed";
+      return result;
+    }
+    if (blockedIp && isBlocked) {
+      result.canRun = false;
+      result.reason = `Playbook already remediated IP ${blockedIp}. Unblock the IP before rerunning.`;
+      result.code = "ip_still_blocked";
+      result.blockedIp = blockedIp;
+      result.diagnostics.rerunBlockedFlag = true;
+      result.diagnostics.remediationState = "ip_blocked";
+      return result;
+    }
     if (latestExecution && blockedIp && lifecycle === "in_case") {
-      const reason = `Previous remediation for ${blockedIp} was reversed. Case remains open, and rerun is available.`;
-      return { canRun: true, reason, code: "rerun_reopened", blockedIp, playbook: playbook?.key || playbook?.id || "" };
+      result.canRun = true;
+      result.reason = `Previous remediation for ${blockedIp} was reversed. Case remains open, and rerun is available.`;
+      result.code = "rerun_reopened";
+      result.blockedIp = blockedIp;
+      result.diagnostics.remediationState = "ip_unblocked";
+      return result;
     }
 
-    return { canRun: true, reason: "", code: "ready", playbook: playbook?.key || playbook?.id || "" };
+    return result;
+  }
+
+  function getPlaybookRunState(alertRef, playbookKey = "", context = {}) {
+    const evaluation = evaluatePlaybookRunState(alertRef, playbookKey, context);
+    if (evaluation.canRun) {
+      if (evaluation.reason) {
+        console.info("PLAYBOOK_RERUN_STATE", evaluation.diagnostics);
+      }
+      return evaluation;
+    }
+    const blockedPayload = {
+      ...evaluation.diagnostics,
+      reason: evaluation.reason,
+      code: evaluation.code
+    };
+    if (["ip_still_blocked", "false_positive", "closed", "suppressed", "missing_alert"].includes(String(evaluation.code || ""))) {
+      console.info("PLAYBOOK_RERUN_BLOCKED", blockedPayload);
+      return evaluation;
+    }
+    console.warn("PLAYBOOK_RERUN_BLOCKED", blockedPayload);
+    return evaluation;
   }
 
   function appendDemoUnblockActivity(ip) {
@@ -3043,17 +3810,9 @@ async function bootstrap() {
     if (!caseRecord || typeof caseRecord !== "object") {
       return false;
     }
-    if (normalizeCaseClosureReason(caseRecord.closureReason || caseRecord.closure_reason) === "false_positive") {
-      return true;
-    }
-    const sourceAlert = caseRecord.alert || null;
-    if (normalizeAlertLifecycle(sourceAlert || {}) === "false_positive") {
-      return true;
-    }
-    return (Array.isArray(caseRecord.actions) ? caseRecord.actions : []).some(action => {
-      const parsed = parseActionEntry(action);
-      return String(parsed?.actionType || action?.actionType || action?.type || "").toLowerCase() === "mark_false_positive";
-    });
+    const caseStatus = normalizeCaseStatus(caseRecord.status);
+    const closureReason = normalizeCaseClosureReason(caseRecord.closureReason || caseRecord.closure_reason);
+    return caseStatus === "closed" && closureReason === "false_positive";
   }
 
   function renderCaseWorkflowStatus(caseRecordOrStatus) {
@@ -3320,29 +4079,56 @@ async function bootstrap() {
       if (!alert) {
         return;
       }
-      const id = String(alert.id || alert.alert_id || buildLocalAlertId(alert) || "");
+      const resolvedAlert = findAlertByAnyId(alert) || alert;
+      const id = String(resolvedAlert.id || resolvedAlert.alert_id || buildLocalAlertId(resolvedAlert) || "");
       if (id && seen.has(id)) {
         return;
       }
       if (id) {
         seen.add(id);
       }
-      linkedAlerts.push(alert);
+      linkedAlerts.push(resolvedAlert);
     };
 
-    addAlert(caseRecord?.alert);
+    const liveAlert = findRuntimeAlertForCase(caseRecord);
+    if (liveAlert) {
+      addAlert(liveAlert);
+    }
+
+    [
+      caseRecord?.source_alert_id,
+      caseRecord?.alert_id,
+      caseRecord?.sourceAlertId
+    ].filter(Boolean).forEach(alertId => {
+      const resolvedAlert = findAlertByAnyId(alertId);
+      if (resolvedAlert) {
+        addAlert(resolvedAlert);
+      }
+    });
+
+    if (caseRecord?.alert) {
+      addAlert(caseRecord.alert);
+    }
     if (Array.isArray(caseRecord?.investigation?.related_alerts)) {
       caseRecord.investigation.related_alerts.forEach(addAlert);
     }
 
     const linkedIds = Array.isArray(caseRecord?.linked_alert_ids) ? caseRecord.linked_alert_ids : [];
     linkedIds.forEach(alertId => {
-      addAlert(findAlertByAnyId(alertId) || statsPanel.getAlertById?.(alertId) || { id: alertId });
+      const resolvedAlert = findAlertByAnyId(alertId) || statsPanel.getAlertById?.(alertId);
+      if (resolvedAlert) {
+        addAlert(resolvedAlert);
+      }
     });
     return linkedAlerts;
   }
 
   function resolveCasePlaybookAlertId(caseRecord) {
+    const liveAlert = findRuntimeAlertForCase(caseRecord);
+    if (liveAlert?.id) {
+      return String(liveAlert.id).trim();
+    }
+
     const candidateIds = [
       caseRecord?.source_alert_id,
       caseRecord?.alert_id,
@@ -3357,9 +4143,6 @@ async function bootstrap() {
       const resolvedAlert = findAlertByAnyId(candidateId);
       if (resolvedAlert?.id) {
         return String(resolvedAlert.id);
-      }
-      if (candidateId) {
-        return candidateId;
       }
     }
 
@@ -3388,7 +4171,7 @@ async function bootstrap() {
       const matchesAttack = attackType && String(normalizedAlert.attackType || "").trim().toLowerCase() === attackType;
       return matchesCaseId || (matchesIp && (!attackType || matchesAttack));
     });
-    return String(relatedAlert?.id || "").trim();
+    return String(relatedAlert?.id || candidateIds[0] || "").trim();
   }
 
   function getRelatedCases(caseRecord) {
@@ -3527,8 +4310,7 @@ async function bootstrap() {
     const showReopenAction = canReopen || caseStatusValue === "closed";
     if (playbookButtonDisabled) {
       console.info("CASE_PLAYBOOK_BUTTON_STATE", {
-        caseId: String(caseRecord?.id || ""),
-        alertId: playbookAlertId,
+        ...playbookRunState.diagnostics,
         disabledBy: isPlaybookRunning ? "case_ui_running" : "run_state",
         runStateCode: playbookRunState.code || "",
         reason: playbookReason
@@ -3699,8 +4481,8 @@ async function bootstrap() {
 
     caseQueueCompletionMessage = "";
 
-    const sourceAlert = caseRecord.alert || null;
-    const sourceAlertId = caseRecord.source_alert_id || caseRecord.alert_id || sourceAlert?.id || "";
+    const sourceAlertId = caseRecord.source_alert_id || caseRecord.alert_id || caseRecord.alert?.id || "";
+    const sourceAlert = findAlertByAnyId(sourceAlertId) || caseRecord.alert || null;
     const linkedAlertFrontendId = getFrontendAlertId(sourceAlertId);
     const linkedInvestigationId = caseRecord.source_investigation_id || caseRecord.investigation_id || caseRecord.investigation?.id || "";
     const linkedAlerts = getCaseLinkedAlerts(caseRecord);
@@ -4203,23 +4985,32 @@ async function bootstrap() {
 
   async function loadPlaybooks() {
     if (state.mode === "demo" || !state.apiKey) {
-      playbookDefinitions = [
-        {
-          key: "credential_containment",
-          id: "playbook-credential-containment",
-          title: "Credential Containment",
-          summary: "Enrich hostile IP context, create a case, assign an analyst, and block the IP.",
-          actions: [{ type: "enrich_ip" }, { type: "check_threat_intel" }, { type: "create_case" }, { type: "assign_analyst" }, { type: "block_ip" }],
-        },
-      ];
-      playbookExecutions = [];
+      localPlaybookFallbackActive = true;
+      playbookDefinitions = getLocalPlaybookDefinitions();
+      if (!Array.isArray(playbookExecutions)) {
+        playbookExecutions = [];
+      }
       renderAdminSocView();
       return;
     }
-    const payload = await requestJson("/playbooks");
-    playbookDefinitions = Array.isArray(payload.playbooks) ? payload.playbooks : [];
-    playbookExecutions = Array.isArray(payload.executions) ? payload.executions : [];
-    renderAdminSocView();
+    try {
+      const payload = await requestJson("/playbooks");
+      localPlaybookFallbackActive = false;
+      playbookDefinitions = Array.isArray(payload.playbooks) ? payload.playbooks : [];
+      playbookExecutions = Array.isArray(payload.executions) ? payload.executions : [];
+      renderAdminSocView();
+    } catch (error) {
+      if (!isMissingRouteError(error)) {
+        throw error;
+      }
+      console.warn("PLAYBOOKS_FALLBACK", { reason: error.message || "Request failed" });
+      localPlaybookFallbackActive = true;
+      playbookDefinitions = getLocalPlaybookDefinitions();
+      if (!Array.isArray(playbookExecutions)) {
+        playbookExecutions = [];
+      }
+      renderAdminSocView();
+    }
   }
 
   async function loadCases() {
@@ -4878,12 +5669,16 @@ async function bootstrap() {
     }
 
     execution.completed_at = Date.now() / 1000;
-    playbookExecutions = [execution, ...playbookExecutions].slice(0, 50);
     const linkedCase = selectLinkedCaseForAlert(state, String(alert.id || ""))
       || casesCache.find(entry =>
         String(entry?.source_alert_id || entry?.alert_id || entry?.sourceAlertId || "") === String(alert.id || "")
       )
       || null;
+    if (linkedCase?.id) {
+      execution.case_id = String(linkedCase.id);
+      execution.caseId = String(linkedCase.id);
+    }
+    playbookExecutions = [execution, ...playbookExecutions].slice(0, 50);
     if (linkedCase?.id) {
       const impactedEntities = execution.steps
         .map(step => getPlaybookStepResultValue(step, ["ip", "assignedTo", "caseId", "case_id"]))
@@ -4924,7 +5719,7 @@ async function bootstrap() {
   }
 
   window.runAlertPlaybook = async (alertId, playbookKey, options = {}) => {
-    if (state.mode === "demo" || !state.apiKey) {
+    if (state.mode === "demo" || !state.apiKey || localPlaybookFallbackActive) {
       if (!playbookDefinitions.length) {
         await loadPlaybooks().catch(() => {});
       }
@@ -5946,6 +6741,7 @@ async function bootstrap() {
     }
 
     const existingCase = casesCache.find(entry => entry.id === caseId);
+    const resolvedAlertId = resolveCasePlaybookAlertId(existingCase);
     if (normalizeCaseStatus(existingCase?.status) === "closed" && status !== "open") {
       return;
     }
@@ -5978,6 +6774,29 @@ async function bootstrap() {
         return;
       }
       if (normalizedStatus === "open") {
+        if (resolvedAlertId) {
+          updateAlertLifecycleLocally(resolvedAlertId, "in_case", {
+            case_id: caseId,
+            caseId: caseId,
+            hasCase: true,
+            false_positive: false,
+            falsePositive: false,
+            disposition: "reopened",
+            alertDisposition: "reopened",
+            alert_disposition: "reopened"
+          });
+          applyWorkflowState(workflowCommands.reopenAlert(state, resolvedAlertId, {
+            status: "in_case",
+            lifecycle: "in_case",
+            alertLifecycle: "in_case",
+            alert_lifecycle: "in_case",
+            case_id: caseId,
+            caseId: caseId,
+            hasCase: true,
+            false_positive: false,
+            falsePositive: false
+          }));
+        }
         selectedCaseTab = "active";
         caseQueueCompletionMessage = "";
         pendingQueuedCaseId = String(caseId);
@@ -5991,6 +6810,24 @@ async function bootstrap() {
         ...entry,
         status: normalizedStatus,
         updated_at: statusTimestamp,
+        ...(normalizedStatus === "open"
+          ? {
+            alert: entry?.alert
+              ? {
+                ...entry.alert,
+                status: "in_case",
+                lifecycle: "in_case",
+                alertLifecycle: "in_case",
+                alert_lifecycle: "in_case",
+                false_positive: false,
+                falsePositive: false,
+                disposition: "reopened",
+                alertDisposition: "reopened",
+                alert_disposition: "reopened"
+              }
+              : entry?.alert
+          }
+          : {}),
         ...(normalizedStatus === "closed"
           ? { closedAt: statusTimestamp * 1000, closed_at: statusTimestamp * 1000 }
           : { closedAt: null, closed_at: null, closureReason: null, closure_reason: null })
@@ -6869,6 +7706,15 @@ async function bootstrap() {
       "waiting"
     );
 
+    if (isRouteMarkedUnavailable("/alerts")) {
+      apiHintNode.textContent = "Alert snapshot route is unavailable. Using limited local mode.";
+      statsPanel.setConnectionStatus({ label: "LIMITED", tone: "error" });
+      setRefreshStatus("Limited data mode", "Live alert snapshots are unavailable from this backend.", "error");
+      setRefreshCountdown("Monitoring paused");
+      setRefreshButtonState(false);
+      return false;
+    }
+
     const alerts = await fetchAlertSnapshot(config.apiBaseUrl, config.apiKey, currentUser?.username);
     if (isDemoMode) {
       return false;
@@ -7061,6 +7907,9 @@ async function bootstrap() {
       await startLiveStream();
       startSocLiveView();
     } catch (error) {
+      if (/500|internal server error|request failed with status 500/i.test(String(error?.message || ""))) {
+        markRouteUnavailable("/alerts", true);
+      }
       statsPanel.reset();
       statsPanel.setConnectionStatus({ label: "API ERROR", tone: "error" });
       apiHintNode.textContent = error.message;
@@ -7069,7 +7918,6 @@ async function bootstrap() {
       setRefreshButtonState(Boolean(config.apiKey));
       setLiveStatus("Offline");
       stopSocLiveView();
-      console.error(error);
     }
   }
 
@@ -7101,6 +7949,8 @@ async function bootstrap() {
     demoAuditLogs = [];
     demoReferenceTime = Date.now();
     autoExecutedDemoPlaybooks = new Set();
+    loggedCaseAlertReconciliations = new Set();
+    detectionRuleTestResults = {};
     currentDemoAlerts = buildStaticDemoAlerts();
     stopRefresh();
     stopLiveStream();
@@ -7118,6 +7968,7 @@ async function bootstrap() {
     statsPanel.setAuditLogs([]);
     loadAssignableUsers();
     loadPlaybooks().catch(() => {});
+    loadDetectionRules().catch(() => {});
     const storedDemoCases = loadStoredDemoCases();
     setCasesState(storedDemoCases);
     autoRunDemoPlaybooks().catch(error => {
@@ -7164,42 +8015,75 @@ async function bootstrap() {
   };
 
   window.login = async () => {
+    if (loginInFlight) {
+      return;
+    }
     const username = usernameNode?.value.trim() || "";
     const password = passwordNode?.value || "";
+    let user = null;
+    loginInFlight = true;
+    if (loginButton) {
+      loginButton.disabled = true;
+      loginButton.textContent = "Logging in...";
+    }
 
     try {
       setLoginError("");
-      const user = await loginUser(username, password);
+      user = await loginUser(username, password);
+      markRouteUnavailable("/alerts", false);
       loginSuccess({
         ...user,
         assignableUsers: Array.isArray(user.assignable_users) ? user.assignable_users : [],
-        expiresAt: Date.now() + SESSION_DURATION
+        expiresAt: Date.now() + LIVE_SESSION_DURATION
       }, user.apiKey || config.apiKey);
 
       currentUser = state.user;
       isEditingApiKey = false;
+      detectionRulesRouteUnavailable = false;
       setInputValue(usernameNode, state.user.username);
       updateUserUi();
       state.mode = "live";
       updateUI();
-      startSocLiveView();
       syncApiKeyField();
-      await loadAssignableUsers();
-      await loadPlaybooks();
-      await loadDetectionRules();
       showView("dashboard");
       showToast(`Logged in as ${state.user.username}`);
+    } catch (error) {
+      console.error(error);
+      const loginMessage = String(error?.message || "");
+      const isCredentialError = /401|403|invalid|unauthorized/i.test(loginMessage);
+      setLoginError(isCredentialError ? "Invalid username or password" : (loginMessage || "Login failed"));
+      passwordNode?.focus();
+      showToast(loginMessage || "Login failed");
+      return;
+    }
+
+    try {
+      await loadAssignableUsers();
+      await loadDetectionRules();
       await refreshDashboard();
       await loadOnlineUsers().catch(() => {});
     } catch (error) {
       console.error(error);
-      setLoginError("Invalid username or password");
-      passwordNode?.focus();
-      showToast(error.message || "Login failed");
+      setLoginError("");
+      showToast(error.message || "Logged in with limited local data");
+    } finally {
+      loginInFlight = false;
+      if (loginButton) {
+        loginButton.disabled = false;
+        loginButton.textContent = "Login";
+      }
     }
   };
 
-  window.logout = async (isSessionTimeout = false) => {
+  window.logout = async (isSessionTimeout = false, reason = "manual_logout", details = {}) => {
+    console.info("LOGOUT_START", {
+      reason,
+      isSessionTimeout,
+      mode: state.mode,
+      isDemoMode,
+      user: state.user?.username || currentUser?.username || null,
+      ...details
+    });
     const username = state.user?.username || currentUser?.username || "Unknown";
     const logoutHeadersReady = Boolean(state.user?.username && state.apiKey && state.mode !== "demo");
     if (logoutHeadersReady) {
@@ -7226,6 +8110,7 @@ async function bootstrap() {
     setCasesState([]);
     setInvestigationsState([]);
     detectionRules = [];
+    detectionRuleTestResults = {};
     selectedDetectionRuleKey = "";
     selectedCaseId = null;
     selectedCaseQueue = [];
@@ -7235,6 +8120,7 @@ async function bootstrap() {
     playbookDefinitions = [];
     playbookExecutions = [];
     casePlaybookUiState = {};
+    loggedCaseAlertReconciliations = new Set();
     pendingCaseAssigneeId = null;
     openExportMenuCaseId = null;
     openCaseMoreActionsId = null;
@@ -7243,7 +8129,7 @@ async function bootstrap() {
     setSelectedCaseId(null);
     setInputValue(usernameNode, "");
     setInputValue(passwordNode, "");
-    stopSocLiveView();
+    stopSocLiveView({ clearDetectionRules: true });
     updateUserUi();
     showToast(isSessionTimeout ? "Session expired. Please login again." : "Logged out");
     syncSearchVisibility("dashboard");
@@ -7280,6 +8166,9 @@ async function bootstrap() {
     localStorage.setItem("cybermap.apiKey", nextKey);
     config = { ...config, apiBaseUrl: nextBaseUrl, apiKey: nextKey };
     state.apiKey = nextKey;
+    markRouteUnavailable("/alerts", false);
+    detectionRulesRouteUnavailable = false;
+    localDetectionRulesFallbackActive = false;
     isEditingApiKey = false;
     if (nextKey) {
       state.mode = "live";
@@ -7585,8 +8474,10 @@ async function bootstrap() {
   syncApiKeyField();
 
   window.setInterval(() => {
-    if (state.user && Date.now() > Number(state.user.expiresAt || 0)) {
-      window.logout?.(true);
+    if (shouldAutoLogoutForExpiredSession()) {
+      triggerAutomaticLogout("session_interval_expired", {
+        expiresAt: Number(state.user?.expiresAt || 0)
+      });
     }
   }, 10000);
 

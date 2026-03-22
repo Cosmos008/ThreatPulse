@@ -149,7 +149,7 @@ async function lookupCountries(apiBaseUrl, apiKey, sourceIps, username) {
   const response = await fetch(`${buildGeolocationBaseUrl(apiBaseUrl)}/lookup`, {
     method: "POST",
     headers: {
-      ...buildHeaders(apiKey, username),
+      "X-API-Key": apiKey,
       "Content-Type": "application/json"
     },
     body: JSON.stringify({ ips: sourceIps })

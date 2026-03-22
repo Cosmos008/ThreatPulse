@@ -3888,6 +3888,305 @@ p {
   margin-bottom: 10px;
 }
 
+#view-detection-rules .dashboard-grid {
+  gap: 16px;
+}
+
+.detection-rules-layout {
+  grid-template-columns: minmax(260px, 0.82fr) minmax(0, 1.38fr);
+  gap: 16px;
+  padding: 16px;
+  align-items: stretch;
+}
+
+.detection-rules-list-panel,
+.detection-rules-editor-shell,
+.detection-rules-editor-panel {
+  height: 100%;
+}
+
+.detection-rules-list-panel,
+.detection-rules-editor-panel {
+  padding: 16px;
+  border-radius: 16px;
+}
+
+.detection-rules-list-panel .panel-heading,
+.detection-rules-editor-panel .panel-heading {
+  margin-bottom: 12px;
+}
+
+#detection-rules-list {
+  display: grid;
+  gap: 10px;
+  align-content: start;
+}
+
+.detection-rule-list-actions {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+}
+
+#detection-rule-editor {
+  align-content: start;
+}
+
+.detection-rule-card {
+  gap: 8px;
+  padding: 12px 13px;
+  border-radius: 14px;
+  min-height: 0;
+}
+
+.detection-rule-card.is-selected {
+  border-color: rgba(15, 98, 254, 0.28);
+  box-shadow: 0 0 0 2px rgba(15, 98, 254, 0.08);
+}
+
+.detection-rule-card-top {
+  align-items: flex-start;
+}
+
+.detection-rule-card-title {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  min-width: 0;
+}
+
+.detection-rule-card-top strong {
+  font-size: 0.96rem;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.detection-rule-selected-tick {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  flex: 0 0 20px;
+  border-radius: 999px;
+  background: rgba(15, 98, 254, 0.16);
+  color: var(--primary);
+  font-size: 0.82rem;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.detection-rule-selected-tick.is-placeholder {
+  background: rgba(148, 163, 184, 0.1);
+  color: transparent;
+}
+
+.detection-rule-card-meta {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+  gap: 4px 10px;
+  font-size: 0.8rem;
+}
+
+.detection-rule-editor {
+  gap: 14px;
+  width: 100%;
+  min-width: 0;
+}
+
+.detection-rule-form-grid {
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.detection-rule-field {
+  gap: 5px;
+  font-size: 0.84rem;
+}
+
+.detection-rule-field input,
+.detection-rule-field select {
+  height: 38px;
+  min-height: 38px;
+  padding-left: 10px;
+  padding-right: 10px;
+  border-radius: 9px;
+  font-size: 0.92rem;
+}
+
+.detection-rule-toggle-field {
+  align-items: flex-start;
+  justify-content: center;
+  padding: 10px 12px;
+  border: 1px solid rgba(15, 98, 254, 0.08);
+  border-radius: 10px;
+  background: rgba(15, 98, 254, 0.04);
+}
+
+.detection-rule-toggle-field input {
+  width: 18px;
+  height: 18px;
+  margin: 2px 0 0;
+  padding: 0;
+  accent-color: var(--primary);
+  box-shadow: none;
+}
+
+.detection-rule-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 10px;
+  align-items: center;
+}
+
+.detection-rule-button {
+  height: 38px;
+  padding: 0 14px;
+  font-size: 0.9rem;
+}
+
+.detection-rule-delete-button {
+  border-color: rgba(220, 38, 38, 0.2);
+  color: #fecaca;
+  background: rgba(127, 29, 29, 0.32);
+}
+
+.detection-rule-delete-button:hover {
+  background: rgba(153, 27, 27, 0.44);
+}
+
+.detection-rule-helper,
+.detection-rule-inline-result {
+  font-size: 0.84rem;
+}
+
+.detection-rule-results {
+  gap: 12px;
+}
+
+.detection-rule-impact-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 8px;
+}
+
+.detection-rule-impact-card {
+  display: grid;
+  gap: 4px;
+  padding: 10px 11px;
+  border-radius: 10px;
+  background: rgba(15, 98, 254, 0.05);
+  border: 1px solid rgba(15, 98, 254, 0.08);
+}
+
+.detection-rule-impact-card span {
+  color: var(--muted);
+  font-size: 0.76rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.detection-rule-impact-card strong {
+  font-size: 0.95rem;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.detection-rule-compact-grid {
+  margin-top: 0;
+  gap: 8px;
+}
+
+.detection-rule-readonly-field {
+  padding: 10px 11px;
+  border: 1px solid rgba(15, 98, 254, 0.08);
+  border-radius: 10px;
+  background: rgba(15, 98, 254, 0.03);
+}
+
+.detection-rule-readonly-field strong {
+  color: var(--text);
+  font-size: 0.95rem;
+}
+
+.detection-rule-match-section {
+  display: grid;
+  gap: 10px;
+}
+
+.detection-rule-match-list {
+  display: grid;
+  gap: 8px;
+}
+
+.detection-rule-results .detail-section {
+  margin-top: 0;
+}
+
+.detection-rule-match-item {
+  display: grid;
+  gap: 8px;
+  padding: 11px 12px;
+  border-radius: 11px;
+  background: rgba(15, 23, 42, 0.46);
+  border: 1px solid rgba(148, 163, 184, 0.12);
+}
+
+.detection-rule-match-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.detection-rule-match-top strong {
+  font-size: 0.9rem;
+}
+
+.detection-rule-match-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.detection-rule-match-meta span {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: rgba(15, 98, 254, 0.08);
+  color: var(--muted);
+  font-size: 0.78rem;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 1400px) {
+  .detection-rules-layout {
+    grid-template-columns: minmax(240px, 0.78fr) minmax(0, 1.22fr);
+  }
+}
+
+@media (max-width: 1100px) {
+  .detection-rules-layout {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 720px) {
+  .detection-rules-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .detection-rule-form-grid,
+  .detection-rule-card-meta,
+  .detection-rule-impact-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
 .admin-row-block {
   display: grid;
   gap: 4px;
